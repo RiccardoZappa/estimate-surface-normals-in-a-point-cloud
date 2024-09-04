@@ -1,15 +1,31 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.18)  # Increased for better CUDA support
 
 # Set the project name and version
-project(HelloWorld VERSION 1.0)
+project(HelloWorldCUDA LANGUAGES CXX CUDA VERSION 1.0)
 
 # Specify the C++ standard
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
-# Add executable target
-add_executable(hello_world main.cpp)
+# Specify the CUDA standard (optional, defaults to C++14 for CUDA 11+)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED True)
 
+# Find CUDA package
+find_package(CUDA REQUIRED)
+
+# Add executable target
+add_executable(hello_world_cuda main.cpp kernel.cu)
+
+# Set CUDA architectures (adjust based on your target GPUs)
+set_target_properties(hello_world_cuda PROPERTIES
+    CUDA_ARCHITECTURES "60;70;75;80;86")
+
+# Include CUDA headers
+target_include_directories(hello_world_cuda PRIVATE ${CUDA_INCLUDE_DIRS})
+
+# Link against CUDA libraries
+target_link_libraries(hello_world_cuda PRIVATE ${CUDA_LIBRARIES})
 
 # Check for C and C++ compilers
 enable_language(C CXX)
