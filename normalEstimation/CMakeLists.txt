@@ -15,7 +15,7 @@ set(CMAKE_CUDA_STANDARD_REQUIRED True)
 find_package(CUDA REQUIRED)
 
 # Add executable target
-add_executable(hello_world_cuda main.cpp kernel.cu)
+add_executable(hello_world_cuda kernel.cu)
 
 # Set CUDA architectures (adjust based on your target GPUs)
 set_target_properties(hello_world_cuda PROPERTIES
