@@ -13,6 +13,9 @@ set(CMAKE_CUDA_STANDARD_REQUIRED True)
 
 # Find CUDA package
 find_package(CUDA REQUIRED)
+# Find PCL and OpenCV
+find_package(PCL 1.8 REQUIRED) # Modify the version if needed
+find_package(OpenCV REQUIRED)
 
 # Add executable target
 add_executable(hello_world_cuda kernel.cu)
@@ -22,10 +25,10 @@ set_target_properties(hello_world_cuda PROPERTIES
     CUDA_ARCHITECTURES "60;70;75;80;86")
 
 # Include CUDA headers
-target_include_directories(hello_world_cuda PRIVATE ${CUDA_INCLUDE_DIRS})
+target_include_directories(hello_world_cuda PRIVATE ${CUDA_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS})
 
 # Link against CUDA libraries
-target_link_libraries(hello_world_cuda PRIVATE ${CUDA_LIBRARIES})
+target_link_libraries(hello_world_cuda PRIVATE ${CUDA_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBS})
 
 # Check for C and C++ compilers
 enable_language(C CXX)
