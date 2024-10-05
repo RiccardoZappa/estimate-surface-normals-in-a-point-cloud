@@ -8,10 +8,11 @@
 #include <iostream>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <pcl/visualization/pcl_visualizer.h>
 #include <pcl/io/pcd_io.h>
 #include <opencv2/opencv.hpp>
 #include <vector>
-#include <vector>
+#include <thread>
 
 #define MAX_DIM 3
 #define MAX_POINTS 1000000
@@ -367,7 +368,23 @@ __global__ void computeNormalsKernel(Point* points, Neighbor* neighbors, int* ne
     cudaFree(devInfo);
 }
 
-void computeNormals(Point* h_points, Neighbor* h_neighbors, int* h_neighbor_counts, int numPoints) {
+void visualizeNormals(pcl::PointCloud<pcl::PointXYZ>::Ptr pointCloud, pcl::PointCloud<pcl::Normal>::Ptr normals) {
+    pcl::visualization::PCLVisualizer viewer("PCL Viewer");
+
+    // Add the point cloud to the viewer
+    viewer.addPointCloud<pcl::PointXYZ>(pointCloud, "cloud");
+
+    // Add the normals to the viewer
+    viewer.addPointCloudNormals<pcl::PointXYZ, pcl::Normal>(pointCloud, normals, 10, 0.05, "normals");
+
+    // Loop until the visualizer window is closed
+    while (!viewer.wasStopped()) {
+        viewer.spinOnce(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+}
+
+void computeNormals(Point* h_points, Neighbor* h_neighbors, int* h_neighbor_counts, int numPoints, float* h_normals) {
     Point* d_points;
     Neighbor* d_neighbors;
     int* d_neighbor_counts;
@@ -393,7 +410,6 @@ void computeNormals(Point* h_points, Neighbor* h_neighbors, int* h_neighbor_coun
     computeNormalsKernel<<<numBlocks, BLOCK_SIZE>>>(d_points, d_neighbors, d_neighbor_counts, numPoints, d_normals, cusolverH);
 
     // Copy normals back to host
-    float* h_normals = (float*)malloc(3 * numPoints * sizeof(float));
     cudaMemcpy(h_normals, d_normals, 3 * numPoints * sizeof(float), cudaMemcpyDeviceToHost);
 
     // Free memory and destroy cuSolver handle
@@ -403,8 +419,10 @@ void computeNormals(Point* h_points, Neighbor* h_neighbors, int* h_neighbor_coun
     cudaFree(d_normals);
     cusolverDnDestroy(cusolverH);
 
-    // Now h_normals contains the computed normals
+
 }
+
+
 
 int main() {
     // Example usage
@@ -436,29 +454,45 @@ int main() {
 
     Point* d_queryPoints;
     Neighbor* d_neighbors;
-    KDNode* d_kdTree;
+    Neighbor* h_neighbors;
     int* d_neighbor_counts;
+    int* h_neighbor_counts;
+    float radius = 3;
 
     cudaMalloc(&d_queryPoints, numPoints * sizeof(Point));
     cudaMalloc(&d_neighbors, numPoints * MAX_NEIGHBOURS * sizeof(Neighbor));
-    cudaMalloc(&d_kdTree, numPoints * sizeof(KDNode));  // Assuming the KD-tree is stored as an array of nodes
+    // Assuming the KD-tree is stored as an array of nodes
     cudaMalloc(&d_neighbor_counts, numPoints * sizeof(int));
 
     cudaMemcpy(d_queryPoints, h_points, numPoints * sizeof(Point), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_kdTree, kdTree, numPoints * sizeof(KDNode), cudaMemcpyHostToDevice);
     cudaMemset(d_neighbor_counts, 0, numPoints * sizeof(int));
 
     int numBlocks = (numPoints + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    radiusSearchKDTreeKernel<<<numBlocks, BLOCK_SIZE>>>(d_queryPoints, radius, numPoints, d_kdTree, d_neighbors, d_neighbor_counts);
+    radiusSearchKDTreeKernel<<<numBlocks, BLOCK_SIZE>>>(d_queryPoints, radius, numPoints, d_tree, d_neighbors, d_neighbor_counts);
     
     cudaMemcpy(h_neighbors, d_neighbors, numPoints * MAX_NEIGHBOURS * sizeof(Neighbor), cudaMemcpyDeviceToHost);
     cudaMemcpy(h_neighbor_counts, d_neighbor_counts, numPoints * sizeof(int), cudaMemcpyDeviceToHost);
 
-    
+
+    float* h_normals = (float*)malloc(3 * numPoints * sizeof(float));
+    computeNormals(h_points, h_neighbors, h_neighbor_counts, numPoints, h_normals);
+
+    // Now h_normals contains the computed normals
+    pcl::PointCloud<pcl::Normal>::Ptr pcl_normals(new pcl::PointCloud<pcl::Normal>());
+    for (int i = 0; i < numPoints; i++) {
+        pcl::Normal normal;
+        normal.normal_x = h_normals[3 * i + 0];
+        normal.normal_y = h_normals[3 * i + 1];
+        normal.normal_z = h_normals[3 * i + 2];
+        pcl_normals->push_back(normal);
+    }
+
+    // Visualize the point cloud and normals
+    visualizeNormals(pointCloud, pcl_normals);
 
     cudaFree(d_queryPoints);
     cudaFree(d_neighbors);
-    cudaFree(d_kdTree);
+    cudaFree(d_tree);
     cudaFree(d_neighbor_counts);
     // free(h_points);
     // free(results);
