@@ -1,4 +1,5 @@
 #include <cuda_runtime.h>
+#include <cusolverDn.h>
 #include <thrust/sort.h>
 #include <thrust/execution_policy.h>
 #include <stdio.h>
@@ -249,6 +250,160 @@ __global__ void radiusSearchKDTreeKernel(Point* queryPoints, float radius, int n
 
     // Store the number of neighbors found for this point
     neighbor_counts[query_idx] = neighbor_count;
+}
+
+__device__ void computeCovarianceMatrix(Point* points, Neighbor* neighbors, int neighbor_count, float covariance[3][3]) {
+    // Compute centroid
+    Point centroid = {0.0f, 0.0f, 0.0f};
+    for (int i = 0; i < neighbor_count; i++) {
+        int neighbor_idx = neighbors[i].idx;
+        centroid.coords[0] += points[neighbor_idx].coords[0];
+        centroid.coords[1] += points[neighbor_idx].coords[1];
+        centroid.coords[2] += points[neighbor_idx].coords[2];
+    }
+    centroid.coords[0] /= neighbor_count;
+    centroid.coords[1] /= neighbor_count;
+    centroid.coords[2] /= neighbor_count;
+
+    // Initialize the covariance matrix to zero
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            covariance[i][j] = 0.0f;
+        }
+    }
+
+    // Compute covariance matrix elements
+    for (int i = 0; i < neighbor_count; i++) {
+        int neighbor_idx = neighbors[i].idx;
+        float dx = points[neighbor_idx].coords[0] - centroid.coords[0];
+        float dy = points[neighbor_idx].coords[1] - centroid.coords[1];
+        float dz = points[neighbor_idx].coords[2] - centroid.coords[2];
+
+        covariance[0][0] += dx * dx;
+        covariance[0][1] += dx * dy;
+        covariance[0][2] += dx * dz;
+
+        covariance[1][0] += dy * dx;
+        covariance[1][1] += dy * dy;
+        covariance[1][2] += dy * dz;
+
+        covariance[2][0] += dz * dx;
+        covariance[2][1] += dz * dy;
+        covariance[2][2] += dz * dz;
+    }
+
+    // Normalize the covariance matrix
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            covariance[i][j] /= neighbor_count;
+        }
+    }
+}
+
+__global__ void computeNormalsKernel(Point* points, Neighbor* neighbors, int* neighbor_counts, int n, float* normals, cusolverDnHandle_t cusolverH) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    int neighbor_count = neighbor_counts[idx];
+    if (neighbor_count < 3) {
+        // Not enough neighbors to compute covariance matrix (minimum 3 neighbors required)
+        normals[3 * idx + 0] = 0.0f;
+        normals[3 * idx + 1] = 0.0f;
+        normals[3 * idx + 2] = 0.0f;
+        return;
+    }
+
+    // Compute the covariance matrix
+    float covariance[3][3];
+    computeCovarianceMatrix(points, &neighbors[idx * MAX_NEIGHBOURS], neighbor_count, covariance);
+
+    // Flatten the covariance matrix to pass to cuSolver
+    float A[9] = {
+        covariance[0][0], covariance[0][1], covariance[0][2],
+        covariance[1][0], covariance[1][1], covariance[1][2],
+        covariance[2][0], covariance[2][1], covariance[2][2]
+    };
+
+    // Allocate space for eigenvalues and eigenvectors
+    float eigenvalues[3];
+    float eigenvectors[9]; // 3x3 matrix
+
+    // Call cuSolver to compute the eigenvalues and eigenvectors
+    int lwork = 0;
+    float* d_work = nullptr;
+    int* devInfo = nullptr;
+    
+    // Allocate memory for device info
+    cudaMalloc(&devInfo, sizeof(int));
+
+    // Query workspace size
+    cusolverDnSsyevd_bufferSize(cusolverH, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_UPPER, 3, A, 3, eigenvalues, &lwork);
+
+    // Allocate workspace
+    cudaMalloc(&d_work, lwork * sizeof(float));
+
+    // Perform the eigen decomposition
+    cusolverDnSsyevd(cusolverH, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_UPPER, 3, A, 3, eigenvalues, d_work, lwork, devInfo);
+
+    // Check if the operation was successful
+    int h_devInfo;
+    cudaMemcpy(&h_devInfo, devInfo, sizeof(int), cudaMemcpyDeviceToHost);
+    if (h_devInfo != 0) {
+        printf("Error: Eigenvalue computation failed with error code %d\n", h_devInfo);
+        return;
+    }
+
+    // The normal is the eigenvector corresponding to the smallest eigenvalue
+    int min_idx = 0;
+    if (eigenvalues[1] < eigenvalues[0]) min_idx = 1;
+    if (eigenvalues[2] < eigenvalues[min_idx]) min_idx = 2;
+
+    normals[3 * idx + 0] = eigenvectors[0 + min_idx * 3];
+    normals[3 * idx + 1] = eigenvectors[1 + min_idx * 3];
+    normals[3 * idx + 2] = eigenvectors[2 + min_idx * 3];
+
+    // Free workspace memory
+    cudaFree(d_work);
+    cudaFree(devInfo);
+}
+
+void computeNormals(Point* h_points, Neighbor* h_neighbors, int* h_neighbor_counts, int numPoints) {
+    Point* d_points;
+    Neighbor* d_neighbors;
+    int* d_neighbor_counts;
+    float* d_normals;
+
+    // Allocate device memory for points, neighbors, neighbor counts, and normals
+    cudaMalloc(&d_points, numPoints * sizeof(Point));
+    cudaMalloc(&d_neighbors, numPoints * MAX_NEIGHBOURS * sizeof(Neighbor));
+    cudaMalloc(&d_neighbor_counts, numPoints * sizeof(int));
+    cudaMalloc(&d_normals, 3 * numPoints * sizeof(float));  // 3 floats per normal (x, y, z)
+
+    // Copy data to device
+    cudaMemcpy(d_points, h_points, numPoints * sizeof(Point), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_neighbors, h_neighbors, numPoints * MAX_NEIGHBOURS * sizeof(Neighbor), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_neighbor_counts, h_neighbor_counts, numPoints * sizeof(int), cudaMemcpyHostToDevice);
+
+    // Initialize cuSolver
+    cusolverDnHandle_t cusolverH;
+    cusolverDnCreate(&cusolverH);
+
+    // Launch kernel to compute normals
+    int numBlocks = (numPoints + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    computeNormalsKernel<<<numBlocks, BLOCK_SIZE>>>(d_points, d_neighbors, d_neighbor_counts, numPoints, d_normals, cusolverH);
+
+    // Copy normals back to host
+    float* h_normals = (float*)malloc(3 * numPoints * sizeof(float));
+    cudaMemcpy(h_normals, d_normals, 3 * numPoints * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Free memory and destroy cuSolver handle
+    cudaFree(d_points);
+    cudaFree(d_neighbors);
+    cudaFree(d_neighbor_counts);
+    cudaFree(d_normals);
+    cusolverDnDestroy(cusolverH);
+
+    // Now h_normals contains the computed normals
 }
 
 int main() {
