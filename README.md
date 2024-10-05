@@ -1,1 +1,1 @@
-# esitmate-surface-normals-in-a-point-cloud
+# estimate-surface-normals-in-a-point-cloud
