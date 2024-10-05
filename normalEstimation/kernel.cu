@@ -95,13 +95,13 @@ __global__ void buildKDTreeKernel(Point* points, int n, int depth) {
 }
 
 // Host function to build the KD-tree
-void buildKDTree(Point* h_points, int n) {
+void buildKDTree(Point* h_points, int numPoints) {
     Point* d_points;
-    cudaMalloc(&d_points, n * sizeof(Point));
-    cudaMemcpy(d_points, h_points, n * sizeof(Point), cudaMemcpyHostToDevice);
+    cudaMalloc(&d_points, numPoints * sizeof(Point));
+    cudaMemcpy(d_points, h_points, numPoints * sizeof(Point), cudaMemcpyHostToDevice);
 
-    int numBlocks = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    buildKDTreeKernel<<<numBlocks, BLOCK_SIZE>>>(d_points, n, 0);
+    int numBlocks = (numPoints + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    buildKDTreeKernel<<<numBlocks, BLOCK_SIZE>>>(d_points, numPoints, 0);
 
     cudaFree(d_points);
 }
@@ -196,6 +196,60 @@ void savePointCloudToStructCUDA(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, Point
     cudaFree(deviceOutputPoints);
 }
 
+__device__ void radiusSearchKDTree(const Point& query, float radius, KDNode* kdTree, int root_idx, int depth, Neighbor* neighbors, int* neighbor_count) {
+    if (root_idx == -1) return;  // Base case for recursion (no node)
+    
+    // Get the current node
+    KDNode node = kdTree[root_idx];
+    float dist_squared = 0;
+    for (int i = 0; i < MAX_DIM; i++) {
+        float diff = node.point.coords[i] - query.coords[i];
+        dist_squared += diff * diff;
+    }
+
+    // If the current node is within the radius, store it
+    if (dist_squared <= radius * radius) {
+        int insert_pos = atomicAdd(neighbor_count, 1);
+        if (insert_pos < MAX_NEIGHBOURS) {
+            neighbors[insert_pos].idx = root_idx;
+            neighbors[insert_pos].dist = sqrtf(dist_squared);
+        }
+    }
+
+    // Recursively traverse the KD-tree
+    int axis = node.axis;  // Axis along which this node was split
+    float diff_axis = query.coords[axis] - node.point.coords[axis];
+
+    // First, explore the side of the tree that contains the query point
+    if (diff_axis <= 0) {
+        radiusSearchKDTree(query, radius, kdTree, node.left, depth + 1, neighbors, neighbor_count);
+    } else {
+        radiusSearchKDTree(query, radius, kdTree, node.right, depth + 1, neighbors, neighbor_count);
+    }
+
+    // Check if we need to search the other side of the tree
+    if (diff_axis * diff_axis <= radius * radius) {
+        if (diff_axis <= 0) {
+            radiusSearchKDTree(query, radius, kdTree, node.right, depth + 1, neighbors, neighbor_count);
+        } else {
+            radiusSearchKDTree(query, radius, kdTree, node.left, depth + 1, neighbors, neighbor_count);
+        }
+    }
+}
+
+__global__ void radiusSearchKDTreeKernel(Point* queryPoints, float radius, int n, KDNode* kdTree, Neighbor* neighbors, int* neighbor_counts) {
+    int query_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (query_idx >= n) return;
+
+    Point query = queryPoints[query_idx];
+    int neighbor_count = 0;
+
+    // Perform the radius search for this query point using the KD-tree
+    radiusSearchKDTree(query, radius, kdTree, 0, 0, neighbors + query_idx * MAX_NEIGHBOURS, &neighbor_count);
+
+    // Store the number of neighbors found for this point
+    neighbor_counts[query_idx] = neighbor_count;
+}
 
 int main() {
     // Example usage
@@ -203,7 +257,7 @@ int main() {
     const int k = 5;  // Number of nearest neighbors to find
 
     //read the depth map
-    cv::Mat depthMap = cv::imread("result.png", cv::IMREAD_GRAYSCALE);
+    cv::Mat depthMap = cv::imread("/home/riccardozappa/esitmate-surface-normals-in-a-point-cloud/normalEstimation/result.png", cv::IMREAD_GRAYSCALE);
     float focalLength = 525.0f;
     int width = depthMap.cols;
     int height = depthMap.rows;
@@ -219,29 +273,43 @@ int main() {
     std::cout << "the point cloud has " << numPoints << " Points" << std::endl;
     Point* h_points = (Point*)malloc(numPoints * sizeof(Point));
 
-    // Initialize points (you should replace this with your actual data)
-    for (int i =  0; i < n; i++) {
-        for (int j = 0; j < MAX_DIM; j++) {
-            h_points[i].coords[j] = (float)rand() / RAND_MAX;
-        }
-    }
+    savePointCloudToStructCUDA(pointCloud, h_points);
 
     // Build KD-tree
-    buildKDTree(h_points, n);
+    buildKDTree(h_points, numPoints);
 
-    // Perform k-nearest neighbors search
-    Point query = {{0.5, 0.5, 0.5}};
-    Neighbor* results = (Neighbor*)malloc(k * sizeof(Neighbor));
 
-    printf("%d nearest neighbors to (%.2f, %.2f, %.2f):\n", k,
-           query.coords[0], query.coords[1], query.coords[2]);
-    for (int i = 0; i < k; i++) {
-        Point p = h_points[results[i].idx];
-        printf("%d. (%.2f, %.2f, %.2f) - distance: %.4f\n", i+1,
-               p.coords[0], p.coords[1], p.coords[2], sqrt(results[i].dist));
-    }
+    Point* d_queryPoints;
+    Neighbor* d_neighbors;
+    KDNode* d_kdTree;
+    int* d_neighbor_counts;
 
-    free(h_points);
-    free(results);
+    cudaMalloc(&d_queryPoints, numPoints * sizeof(Point));
+    cudaMalloc(&d_neighbors, numPoints * MAX_NEIGHBOURS * sizeof(Neighbor));
+    cudaMalloc(&d_kdTree, numPoints * sizeof(KDNode));  // Assuming the KD-tree is stored as an array of nodes
+    cudaMalloc(&d_neighbor_counts, numPoints * sizeof(int));
+
+    cudaMemcpy(d_queryPoints, h_points, numPoints * sizeof(Point), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_kdTree, kdTree, numPoints * sizeof(KDNode), cudaMemcpyHostToDevice);
+    cudaMemset(d_neighbor_counts, 0, numPoints * sizeof(int));
+
+    int numBlocks = (numPoints + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    radiusSearchKDTreeKernel<<<numBlocks, BLOCK_SIZE>>>(d_queryPoints, radius, numPoints, d_kdTree, d_neighbors, d_neighbor_counts);
+    
+    cudaMemcpy(h_neighbors, d_neighbors, numPoints * MAX_NEIGHBOURS * sizeof(Neighbor), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_neighbor_counts, d_neighbor_counts, numPoints * sizeof(int), cudaMemcpyDeviceToHost);
+
+    
+
+    cudaFree(d_queryPoints);
+    cudaFree(d_neighbors);
+    cudaFree(d_kdTree);
+    cudaFree(d_neighbor_counts);
+    // free(h_points);
+    // free(results);
     return 0;
 }
+
+
+
+
