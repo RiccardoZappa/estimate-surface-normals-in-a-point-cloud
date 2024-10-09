@@ -8,6 +8,11 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <opencv2/opencv.hpp>
+#include <opencv2/opencv.hpp>
+#include <pcl/point_types.h>
+#include <pcl/io/pcd_io.h>
+#include <iostream>
+
 
 #define eChk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true) {
@@ -18,7 +23,7 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 }
 
 const int MAX_DIM = 3;   // Maximum dimensions of points (can be changed)
-const int N_POINTS = 1e4, N_QUERIES = 1e6, K_NEIGHBORS = 5, INF = 1e9, RANGE_MAX = 100, N_PRINT = 10;
+const int N_POINTS = 1e4, N_QUERIES = 1e6, K_NEIGHBORS = 10, INF = 1e9, RANGE_MAX = 100, N_PRINT = 10;
 
 struct Point {
     float coords[MAX_DIM];  // Coordinates in MAX_DIM-dimensional space
@@ -39,31 +44,42 @@ __global__ void kNearestNeighborsGPU(KDNode *tree, int treeSize, Point *queries,
 __host__ void printResults(Point *queries, Point *results, int start, int end);
 
 
-// Function to convert depth map to PCL point cloud
-pcl::PointCloud<pcl::PointXYZ>::Ptr depthMapToPointCloud(const cv::Mat& depthMap, const cv::Mat& cameraMatrix) {
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
+// Camera intrinsics (you will need to fill these in based on your camera)
+const float fx = 500.0f;  // Focal length in x direction
+const float fy = 500.0f;  // Focal length in y direction
+const float cx = 512.0f;  // Principal point (center of the image in x)
+const float cy = 512.0f;  // Principal point (center of the image in y)
 
-    float fx = cameraMatrix.at<float>(0, 0); // focal length x
-    float fy = cameraMatrix.at<float>(1, 1); // focal length y
-    float cx = cameraMatrix.at<float>(0, 2); // principal point x
-    float cy = cameraMatrix.at<float>(1, 2); // principal point y
+// Convert depth map to point cloud using PCL
+pcl::PointCloud<pcl::PointXYZ>::Ptr depthMapToPointCloud(const cv::Mat& depthMap) {
+    // Create a new point cloud object
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
 
-    for (int y = 0; y < depthMap.rows; y++) {
-        for (int x = 0; x < depthMap.cols; x++) {
-            float depth = depthMap.at<float>(y, x);
+    // Loop through each pixel in the depth map
+    for (int v = 0; v < depthMap.rows; ++v) {
+        for (int u = 0; u < depthMap.cols; ++u) {
+            float depthValue = depthMap.at<uchar>(v, u);  // Grayscale depth value
+            float Z = depthValue;  // Depth value (this can be scaled as per your needs)
 
-            if (depth > 0) {
+            if (Z > 0) {  // Ignore points with zero or invalid depth
+                float X = (u - cx) * Z / fx;
+                float Y = (v - cy) * Z / fy;
+
+                // Add the 3D point to the point cloud
                 pcl::PointXYZ point;
-                point.x = (x - cx) * depth / fx;
-                point.y = (y - cy) * depth / fy;
-                point.z = depth;
+                point.x = X;
+                point.y = Y;
+                point.z = Z;
                 cloud->points.push_back(point);
             }
         }
     }
-    cloud->width = (int)cloud->points.size();
-    cloud->height = 1;
+
+    // Set the width and height of the point cloud
+    cloud->width = cloud->points.size();
+    cloud->height = 1;  // Unordered point cloud (1 row)
     cloud->is_dense = false;
+
     return cloud;
 }
 
@@ -110,43 +126,72 @@ void savePointCloudToStructCUDA(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, Point
 
 
 int main() {
-    srand(16);
+
+        // Load the depth map image using OpenCV
+    cv::Mat depthMap = cv::imread("/home/riccardozappa/estimate-surface-normals-in-a-point-cloud/normalEstimation/result.png", cv::IMREAD_GRAYSCALE);
+
+    if (depthMap.empty()) {
+        std::cerr << "Could not load depth map image." << std::endl;
+        return -1;
+    }
+
+    // Convert the depth map to a point cloud using PCL
+    pcl::PointCloud<pcl::PointXYZ>::Ptr pointCloud = depthMapToPointCloud(depthMap);
+
+    // Save the point cloud to a PCD file
+    pcl::io::savePCDFileASCII("point_cloud_output.pcd", *pointCloud);
+    std::cout << "Saved point cloud with " << pointCloud->points.size() << " points." << std::endl;
+
+    int numPoints = pointCloud->size();
+    std::cout << "the point cloud has " << numPoints << " Points" << std::endl;
+
+    Point* h_points = (Point*)malloc(numPoints * sizeof(Point));
+    Point* queries;
+
+    eChk(cudaMallocManaged(&queries, numPoints * sizeof(Point)));
+
+    savePointCloudToStructCUDA(pointCloud, h_points);
+    savePointCloudToStructCUDA(pointCloud, queries);
+    
+    // printPoints(h_points, numPoints);
 
     int TREE_SIZE = 1;
-    while (TREE_SIZE < N_POINTS) TREE_SIZE <<= 1;
+    while (TREE_SIZE < numPoints) TREE_SIZE <<= 1;
 
-    Point *points;
+    std::cout << "tree size: " << TREE_SIZE << std::endl;
+    
     KDNode *tree;
-    Point *queries;
+    
 
-    eChk(cudaMallocManaged(&points, N_POINTS * sizeof(Point)));
+    
     eChk(cudaMallocManaged(&tree, TREE_SIZE * sizeof(KDNode)));
-    eChk(cudaMallocManaged(&queries, N_QUERIES * sizeof(Point)));
 
-    generatePoints(points, N_POINTS);
-    buildKDTree(points, tree, N_POINTS, TREE_SIZE);
-    generatePoints(queries, N_QUERIES);
-
+    std::cout << "building KdTree"<< std::endl;
+    buildKDTree(h_points, tree, numPoints, TREE_SIZE);
+    
     auto start = std::chrono::system_clock::now();
 
     Point *results;
-    eChk(cudaMallocManaged(&results, N_QUERIES * K_NEIGHBORS * sizeof(Point)));
-
-    kNearestNeighborsGPU<<<32768, 32>>>(tree, TREE_SIZE, queries, results, N_QUERIES, K_NEIGHBORS);
+    eChk(cudaMallocManaged(&results, numPoints * K_NEIGHBORS * sizeof(Point)));
+    std::cout << "serarching for k nearest neighbours"<< std::endl;
+    kNearestNeighborsGPU<<<32768, 32>>>(tree, TREE_SIZE, queries, results, numPoints, K_NEIGHBORS);
     eChk(cudaDeviceSynchronize());
     
     auto end = std::chrono::system_clock::now();
     float duration = 1000.0 * std::chrono::duration<float>(end - start).count();
 
-    printResults(queries, results, N_QUERIES - N_PRINT - 1, N_QUERIES);
-
     std::cout << "Elapsed time in milliseconds : " << duration << "ms\n\n";
 
+    printResults(queries, results, 0, numPoints);
+
+
     eChk(cudaFree(results));
-    eChk(cudaFree(points));
     eChk(cudaFree(tree));
     eChk(cudaFree(queries));
+
+    free(h_points);
 }
+
 
 // Helper function to generate random points in MAX_DIM dimensions
 __host__ void generatePoints(Point *points, int n) {
