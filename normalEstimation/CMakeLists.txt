@@ -18,8 +18,11 @@ find_package(CUDA REQUIRED)
 find_package(PCL 1.8 REQUIRED) # Modify the version if needed
 find_package(OpenCV REQUIRED)
 
+set(CUDA_LIBRARIES ${CUDA_LIBRARIES} cusolver cublas)
 # Add executable target
 add_executable(hello_world_cuda kernel.cu)
+add_executable(nearest_neighbours_cuda cuda_nearest_neighbours.cu)
+add_executable(normal_estimation normalEstimation.cpp)
 
 # Set CUDA architectures (adjust based on your target GPUs)
 set_target_properties(hello_world_cuda PROPERTIES
@@ -28,8 +31,15 @@ set_target_properties(hello_world_cuda PROPERTIES
 # Include CUDA headers
 target_include_directories(hello_world_cuda PRIVATE ${CUDA_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS})
 
+target_include_directories(nearest_neighbours_cuda PRIVATE ${PCL_INCLUDE_DIRS} ${CUDA_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS})
+
+target_include_directories(normal_estimation PRIVATE  ${PCL_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS})
 # Link against CUDA libraries
 target_link_libraries(hello_world_cuda PRIVATE ${CUDA_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBS})
+
+target_link_libraries(nearest_neighbours_cuda PRIVATE ${CUDA_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBS})
+
+target_link_libraries(normal_estimation PRIVATE ${PCL_LIBRARIES} ${OpenCV_LIBS})
 
 # Check for C and C++ compilers
 enable_language(C CXX)
