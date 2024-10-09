@@ -23,7 +23,7 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 }
 
 const int MAX_DIM = 3;   // Maximum dimensions of points (can be changed)
-const int N_POINTS = 1e4, N_QUERIES = 1e6, K_NEIGHBORS = 10, INF = 1e9, RANGE_MAX = 100, N_PRINT = 10;
+const int N_POINTS = 1e4, N_QUERIES = 1e6, K_NEIGHBORS = 20, INF = 1e9, RANGE_MAX = 100, N_PRINT = 10;
 
 struct Point {
     float coords[MAX_DIM];  // Coordinates in MAX_DIM-dimensional space
@@ -235,7 +235,6 @@ __host__ void buildKDTree(Point *points, KDNode *tree, int n, int treeSize) {
     buildSubTree(points, tree, 0, n, 0, 1);
 }
 
-// Device function to compute Euclidean distance between two points
 __device__ float distance(const Point &p1, const Point &p2) {
     float dist = 0.0f;
     for (int i = 0; i < MAX_DIM; i++) {
@@ -252,29 +251,48 @@ struct KNNComparator {
 };
 
 // Recursive device function for finding K nearest neighbors
-__device__ void findKNearestNeighbors(KDNode *tree, int treeSize, int treeNode, int depth, Point query, Point *neighbors, int k) {
+ __device__ void findKNearestNeighbors(KDNode *tree, int treeSize, int treeNode, int depth, Point query, Point *neighbors, int k) {
     // Base case
     if (treeNode >= treeSize) return;
 
     KDNode node = tree[treeNode];
     if (node.axis == -1) return;
 
-    // Push the current node point into neighbors array
+    bool near = false;
+    int max = 0;
+    float dist = 0;
+    int index = 0;
+     // Push the current node point into neighbors array
     for (int i = 0; i < k; i++) {
-        if (i == k - 1 || distance(node.point, query) < distance(neighbors[i], query)) {
-            neighbors[i] = node.point;
+        if ( distance(node.point, query) < distance(neighbors[i], query) ) {
+            near = true;
             break;
         }
     }
+    if (near)
+    {
+        for (int j=0; j < k; j++)
+        {  
+            dist = distance(neighbors[j], query);
+            if (max < dist)
+            {
+                max = dist;
+                index = j;
+            }
+        }
+        neighbors[index] = node.point;
+    }
 
-    // Find the next subtree to search
+     // Find the next subtree to search
     int nextAxis = (depth + 1) % MAX_DIM;
     if (query.coords[node.axis] < node.point.coords[node.axis]) {
-        findKNearestNeighbors(tree, treeSize, treeNode * 2, depth + 1, query, neighbors, k);
+         findKNearestNeighbors(tree, treeSize, treeNode * 2, depth + 1, query, neighbors, k);
     } else {
-        findKNearestNeighbors(tree, treeSize, treeNode * 2 + 1, depth + 1, query, neighbors, k);
+         findKNearestNeighbors(tree, treeSize, treeNode * 2 + 1, depth + 1, query, neighbors, k);
     }
-}
+ }
+
+
 
 // Kernel to perform K nearest neighbor search for all queries
 __global__ void kNearestNeighborsGPU(KDNode *tree, int treeSize, Point *queries, Point *results, int nQueries, int k) {
@@ -282,6 +300,12 @@ __global__ void kNearestNeighborsGPU(KDNode *tree, int treeSize, Point *queries,
 
     if (index < nQueries) {
         Point neighbors[K_NEIGHBORS];  // Local array to store the K nearest neighbors
+
+        for (int i = 0; i < k; i++) {
+            neighbors[i].coords[0] = INF;
+            neighbors[i].coords[1] = INF;
+            neighbors[i].coords[2] = INF;  // Assuming Point() initializes it to an invalid point
+        }
         findKNearestNeighbors(tree, treeSize, 1, 0, queries[index], neighbors, k);
 
         // Copy the neighbors to the results array
@@ -289,8 +313,7 @@ __global__ void kNearestNeighborsGPU(KDNode *tree, int treeSize, Point *queries,
             results[index * k + i] = neighbors[i];
         }
     }
-}
-
+} 
 // Print a list of points
 void printPoints(Point *points, int n) {
     for (int i = 0; i < n; i++) {
