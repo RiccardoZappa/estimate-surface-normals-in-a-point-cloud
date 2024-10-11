@@ -11,6 +11,7 @@
 #include <opencv2/opencv.hpp>
 #include <pcl/point_types.h>
 #include <pcl/io/pcd_io.h>
+#include <cusolverDn.h>
 #include <iostream>
 
 
@@ -22,8 +23,17 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
    }
 }
 
+#define CUSOLVER_CHECK(call) { cusolverAssert((call), __FILE__, __LINE__); }                                             
+inline void cusolverAssert(cusolverStatus_t status, const char *file, int line, bool abort=true) {
+    if (status != CUSOLVER_STATUS_SUCCESS) {
+        fprintf(stderr, "CUSOLVER error in file '%s' in line %d: %d\n", file, line, status);
+        if (abort) exit(EXIT_FAILURE);
+    }
+}
+
 const int MAX_DIM = 3;   // Maximum dimensions of points (can be changed)
-const int N_POINTS = 1e4, N_QUERIES = 1e6, K_NEIGHBORS = 20, INF = 1e9, RANGE_MAX = 100, N_PRINT = 10;
+const int BLOCK_SIZE = 256;
+const int N_POINTS = 1e4, N_QUERIES = 1e6, K_NEIGHBORS = 10, INF = 1e9, RANGE_MAX = 100, N_PRINT = 10;
 
 struct Point {
     float coords[MAX_DIM];  // Coordinates in MAX_DIM-dimensional space
@@ -124,6 +134,179 @@ void savePointCloudToStructCUDA(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, Point
     cudaFree(deviceOutputPoints);
 }
 
+__global__ void computeNormalsKernel(float* d_covarianceMatrices, float* d_eigenValues, float* d_eigenVectors, Point* d_normals, int nPoints, int dim) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < nPoints) {
+        // Find the eigenvector corresponding to the smallest eigenvalue
+        int minIndex = 0;
+        for (int j = 1; j < dim; j++) {
+            if (d_eigenValues[i * dim + j] < d_eigenValues[i * dim + minIndex]) {
+                minIndex = j;
+            }
+        }
+        printf("Point %d: Min eigenvalue at index %d\n", i, minIndex);
+        printf("Eigenvalue: %f\n", d_eigenValues[i * dim + minIndex]);
+
+        // Copy the normal vector (corresponding to the smallest eigenvalue)
+        for (int d = 0; d < dim; d++) {
+            d_normals[i].coords[d] = d_eigenVectors[i * dim * dim + d * dim + minIndex];
+            printf("Normal component [%d] = %f\n", d, d_normals[i].coords[d]);
+        }
+
+        // Normalize the normal vector
+        float norm = 0.0f;
+        for (int d = 0; d < dim; d++) {
+            norm += d_normals[i].coords[d] * d_normals[i].coords[d];
+        }
+        norm = sqrtf(norm);
+        printf("Norm before normalization: %f\n", norm);
+        for (int d = 0; d < dim; d++) {
+            d_normals[i].coords[d] /= norm;
+            printf("Normalized normal component [%d] = %f\n", d, d_normals[i].coords[d]);
+        }
+    }
+}
+
+__host__ void computeNormalsWithCuSolver(float* covarianceMatrices, Point* normals, int nPoints, int dim) {
+    // cuSolver handle
+    cusolverDnHandle_t cusolverH = NULL;
+    cusolverDnCreate(&cusolverH);
+
+    // Allocate device memory
+    float *d_covarianceMatrices, *d_eigenValues, *d_eigenVectors;
+    Point *d_normals;
+    int *d_info;
+    float *d_work;
+
+    eChk(cudaMalloc((void**)&d_covarianceMatrices, nPoints * dim * dim * sizeof(float)));
+    eChk(cudaMalloc((void**)&d_eigenValues, nPoints * dim * sizeof(float)));
+    eChk(cudaMalloc((void**)&d_eigenVectors, nPoints * dim * dim * sizeof(float)));
+    eChk(cudaMalloc((void**)&d_normals, nPoints * sizeof(Point)));
+    eChk(cudaMalloc((void**)&d_info, sizeof(int)));
+
+    // Copy data to device
+    eChk(cudaMemcpy(d_covarianceMatrices, covarianceMatrices, nPoints * dim * dim * sizeof(float), cudaMemcpyHostToDevice));
+   
+   // Debug: Print covariance matrix passed
+    float debugMatrix[9];
+    cudaMemcpy(debugMatrix, covarianceMatrices, 9 * sizeof(float), cudaMemcpyDeviceToHost);
+    std::cout << "covariance matrix passed to debug:" << std::endl;
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            std::cout << debugMatrix[i*3 + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+    // Workspace size
+    int lda = dim;
+    int workSize = 0;
+    CUSOLVER_CHECK(cusolverDnSsyevd_bufferSize(cusolverH, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_UPPER, 
+                                dim, d_covarianceMatrices, lda, d_eigenValues, &workSize));
+
+    cudaMalloc((void**)&d_work, workSize * sizeof(float));
+
+    // Compute eigenvalues and eigenvectors for all matrices
+    CUSOLVER_CHECK(cusolverDnSsyevd(cusolverH, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_UPPER,
+                     dim, d_covarianceMatrices, lda, d_eigenValues, d_work, workSize, d_info));
+
+    // Check if the operation was successful
+    int info;
+    cudaMemcpy(&info, d_info, sizeof(int), cudaMemcpyDeviceToHost);
+    if (info != 0) {
+        std::cerr << "Eigenvalue decomposition failed with error " << info << std::endl;
+        // Handle error...
+    }
+
+    //to debug the eigenvalues
+    float debugEigenvalues[3];
+    cudaMemcpy(debugEigenvalues, d_eigenValues, 3 * sizeof(float), cudaMemcpyDeviceToHost);
+    std::cout << "first three eigenvalues:" << std::endl;
+    for (int i = 0; i < 3; i++) {
+        std::cout << debugEigenvalues[i] << " ";
+        std::cout << std::endl;
+    }
+
+    // Launch kernel to compute normals
+    int threadsPerBlock = 256;
+    int blocks = (nPoints + threadsPerBlock - 1) / threadsPerBlock;
+    computeNormalsKernel<<<blocks, threadsPerBlock>>>(d_covarianceMatrices, d_eigenValues, d_eigenVectors, d_normals, nPoints, dim);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+    }
+    cudaDeviceSynchronize();
+    // Copy results back to host
+    cudaMemcpy(normals, d_normals, nPoints * sizeof(Point), cudaMemcpyDeviceToHost);
+
+    // Cleanup
+    cusolverDnDestroy(cusolverH);
+    cudaFree(d_covarianceMatrices);
+    cudaFree(d_eigenValues);
+    cudaFree(d_eigenVectors);
+    cudaFree(d_normals);
+    cudaFree(d_info);
+    cudaFree(d_work);
+}
+
+__global__ void computeCovarianceMatrix(Point* points, Point* neighbors, float* covarianceMatrices, int numPoints, int kN) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numPoints) return;
+
+    float mean[3] = {0, 0, 0};
+    
+    // Debug: Print the first point and its neighbors
+    if (idx == 0) {
+        printf("Debug: First point coordinates: %f, %f, %f\n", 
+               points[idx].coords[0], points[idx].coords[1], points[idx].coords[2]);
+        printf("Debug: First point neighbors:\n");
+        for (int k = 0; k < kN; k++) {
+            Point neighbor = neighbors[idx * kN + k];
+            printf("%f, %f, %f\n", neighbor.coords[0], neighbor.coords[1], neighbor.coords[2]);
+        }
+    }
+    
+    // Compute mean
+    for (int k = 0; k < kN; k++) {
+        Point neighbor = neighbors[idx * kN + k];
+        for (int i = 0; i < 3; i++) {
+            mean[i] += neighbor.coords[i];
+        }
+    }
+    for (int i = 0; i < 3; i++) {
+        mean[i] /= kN;
+    }
+
+    // Compute covariance
+    float cov[3][3] = {{0}};
+    for (int k = 0; k < kN; k++) {
+        Point neighbor = neighbors[idx * kN + k];
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                cov[i][j] += (neighbor.coords[i] - mean[i]) * (neighbor.coords[j] - mean[j]);
+            }
+        }
+    }
+
+    // Normalize and store
+    const float epsilon = 1e-6f;
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            covarianceMatrices[idx * 9 + i * 3 + j] = cov[i][j] / (kN - 1);
+            if (i == j) covarianceMatrices[idx * 9 + i * 3 + j] += epsilon;
+        }
+    }
+
+    // Debug: Print the computed covariance matrix for the first point
+    if (idx == 0) {
+        printf("Debug: Computed covariance matrix for first point:\n");
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                printf("%e ", covarianceMatrices[idx * 9 + i * 3 + j]);
+            }
+            printf("\n");
+        }
+    }
+}
 
 int main() {
 
@@ -169,12 +352,13 @@ int main() {
     std::cout << "building KdTree"<< std::endl;
     buildKDTree(h_points, tree, numPoints, TREE_SIZE);
     
-    auto start = std::chrono::system_clock::now();
+    auto start = std::chrono::high_resolution_clock::now();
+    int numBlocks = (numPoints + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
     Point *results;
     eChk(cudaMallocManaged(&results, numPoints * K_NEIGHBORS * sizeof(Point)));
     std::cout << "serarching for k nearest neighbours"<< std::endl;
-    kNearestNeighborsGPU<<<32768, 32>>>(tree, TREE_SIZE, queries, results, numPoints, K_NEIGHBORS);
+    kNearestNeighborsGPU<<<numBlocks, BLOCK_SIZE>>>(tree, TREE_SIZE, queries, results, numPoints, K_NEIGHBORS);
     eChk(cudaDeviceSynchronize());
     
     auto end = std::chrono::system_clock::now();
@@ -182,14 +366,41 @@ int main() {
 
     std::cout << "Elapsed time in milliseconds : " << duration << "ms\n\n";
 
-    printResults(queries, results, 0, numPoints);
+    //printResults(queries, results, 0, numPoints);
+    float* covarianceMatrices;
+    Point* normals;
 
+    // Allocate memory
+    eChk(cudaMallocManaged(&covarianceMatrices, numPoints * MAX_DIM * MAX_DIM * sizeof(float)));
+    eChk(cudaMallocManaged(&normals, numPoints * sizeof(Point)));
+
+    // Step 1: Compute covariance matrices
+    computeCovarianceMatrix<<<(numPoints + 255) / 256, 256>>>(queries, results, covarianceMatrices, numPoints, K_NEIGHBORS);
+    eChk(cudaDeviceSynchronize());
+    
+    // Debug: Print first covariance matrix
+    float debugMatrix[9];
+    cudaMemcpy(debugMatrix, covarianceMatrices, 9 * sizeof(float), cudaMemcpyDeviceToHost);
+    std::cout << "First covariance matrix:" << std::endl;
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            std::cout << debugMatrix[i*3 + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+
+    computeNormalsWithCuSolver(covarianceMatrices, normals, numPoints, MAX_DIM);
+
+    printPoints(normals, 10);
 
     eChk(cudaFree(results));
     eChk(cudaFree(tree));
     eChk(cudaFree(queries));
-
+    eChk(cudaFree(covarianceMatrices));
+    eChk(cudaFree(normals));
     free(h_points);
+    
+    return 0;
 }
 
 
