@@ -135,37 +135,60 @@ void savePointCloudToStructCUDA(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, Point
 }
 
 __global__ void computeNormalsKernel(float* d_covarianceMatrices, float* d_eigenValues, float* d_eigenVectors, Point* d_normals, int nPoints, int dim) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < nPoints) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < nPoints) {
+        //to debug the eigenvalues given
+        if (idx == 0){
+            printf("the first three eigenvalues are:");
+            for (int i = 0; i < 3; i++) {
+                printf("%f \n", d_eigenValues[i]);
+            }
+            for(int m = 0; m < 3; m++)
+            {
+                printf("the first three eigenvectors are:");
+                printf("[");
+                for (int j = 0; j < 3; j++) {
+                    printf("%f ", d_eigenVectors[m + j * dim]);
+                }
+                printf("] \n");
+            }
+        }
         // Find the eigenvector corresponding to the smallest eigenvalue
         int minIndex = 0;
         for (int j = 1; j < dim; j++) {
-            if (d_eigenValues[i * dim + j] < d_eigenValues[i * dim + minIndex]) {
+            if (d_eigenValues[idx * dim + j] < d_eigenValues[idx * dim + minIndex]) {
                 minIndex = j;
             }
         }
-        printf("Point %d: Min eigenvalue at index %d\n", i, minIndex);
-        printf("Eigenvalue: %f\n", d_eigenValues[i * dim + minIndex]);
-
+        if (idx == 0) { 
+            printf("Point %d: Min eigenvalue at index %d\n", idx, minIndex);
+            printf("Eigenvalue: %f\n", d_eigenValues[idx * dim + minIndex]);
+        }
         // Copy the normal vector (corresponding to the smallest eigenvalue)
         for (int d = 0; d < dim; d++) {
-            d_normals[i].coords[d] = d_eigenVectors[i * dim * dim + d * dim + minIndex];
-            printf("Normal component [%d] = %f\n", d, d_normals[i].coords[d]);
+            d_normals[idx].coords[d] = d_eigenVectors[idx * dim * dim + d * dim + minIndex];
+            if (idx == 0) { 
+                printf("Normal component [%d] = %f\n", d, d_normals[idx].coords[d]);
+            }
         }
-
         // Normalize the normal vector
         float norm = 0.0f;
         for (int d = 0; d < dim; d++) {
-            norm += d_normals[i].coords[d] * d_normals[i].coords[d];
+            norm += d_normals[idx].coords[d] * d_normals[idx].coords[d];
         }
         norm = sqrtf(norm);
-        printf("Norm before normalization: %f\n", norm);
+        if (idx == 0) { 
+            printf("Norm before normalization: %f\n", norm);
+        }
         for (int d = 0; d < dim; d++) {
-            d_normals[i].coords[d] /= norm;
-            printf("Normalized normal component [%d] = %f\n", d, d_normals[i].coords[d]);
+            d_normals[idx].coords[d] /= norm;
+            if (idx == 0) { 
+                printf("Normalized normal component [%d] = %f\n", d, d_normals[idx].coords[d]);
+            }
         }
     }
 }
+
 
 __host__ void computeNormalsWithCuSolver(float* covarianceMatrices, Point* normals, int nPoints, int dim) {
     // cuSolver handle
@@ -229,7 +252,7 @@ __host__ void computeNormalsWithCuSolver(float* covarianceMatrices, Point* norma
     // Launch kernel to compute normals
     int threadsPerBlock = 256;
     int blocks = (nPoints + threadsPerBlock - 1) / threadsPerBlock;
-    computeNormalsKernel<<<blocks, threadsPerBlock>>>(d_covarianceMatrices, d_eigenValues, d_eigenVectors, d_normals, nPoints, dim);
+    computeNormalsKernel<<<blocks, threadsPerBlock>>>(d_covarianceMatrices, d_eigenValues, d_covarianceMatrices, d_normals, nPoints, dim);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         fprintf(stderr, "CUDA kernel launch error: %s\n", cudaGetErrorString(err));
