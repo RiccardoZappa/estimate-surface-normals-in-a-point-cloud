@@ -5,31 +5,42 @@
 #include <opencv2/opencv.hpp>
 #include <thread>
 
-// Function to convert depth map to PCL point cloud
-pcl::PointCloud<pcl::PointXYZ>::Ptr depthMapToPointCloud(const cv::Mat& depthMap, const cv::Mat& cameraMatrix) {
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
+// Camera intrinsics (you will need to fill these in based on your camera)
+const float fx = 500.0f;  // Focal length in x direction
+const float fy = 500.0f;  // Focal length in y direction
+const float cx = 512.0f;  // Principal point (center of the image in x)
+const float cy = 512.0f;  // Principal point (center of the image in y)
 
-    float fx = cameraMatrix.at<float>(0, 0); // focal length x
-    float fy = cameraMatrix.at<float>(1, 1); // focal length y
-    float cx = cameraMatrix.at<float>(0, 2); // principal point x
-    float cy = cameraMatrix.at<float>(1, 2); // principal point y
+// Convert depth map to point cloud using PCL
+pcl::PointCloud<pcl::PointXYZ>::Ptr depthMapToPointCloud(const cv::Mat& depthMap) {
+    // Create a new point cloud object
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
 
-    for (int y = 0; y < depthMap.rows; y++) {
-        for (int x = 0; x < depthMap.cols; x++) {
-            float depth = depthMap.at<float>(y, x);
+    // Loop through each pixel in the depth map
+    for (int v = 0; v < depthMap.rows; ++v) {
+        for (int u = 0; u < depthMap.cols; ++u) {
+            float depthValue = depthMap.at<uchar>(v, u);  // Grayscale depth value
+            float Z = depthValue;  // Depth value (this can be scaled as per your needs)
 
-            if (depth > 0) {
+            if (Z > 0) {  // Ignore points with zero or invalid depth
+                float X = (u - cx) * Z / fx;
+                float Y = (v - cy) * Z / fy;
+
+                // Add the 3D point to the point cloud
                 pcl::PointXYZ point;
-                point.x = (x - cx) * depth / fx;
-                point.y = (y - cy) * depth / fy;
-                point.z = depth;
+                point.x = X;
+                point.y = Y;
+                point.z = Z;
                 cloud->points.push_back(point);
             }
         }
     }
-    cloud->width = (int)cloud->points.size();
-    cloud->height = 1;
+
+    // Set the width and height of the point cloud
+    cloud->width = cloud->points.size();
+    cloud->height = 1;  // Unordered point cloud (1 row)
     cloud->is_dense = false;
+
     return cloud;
 }
 
@@ -37,20 +48,18 @@ int main()
 {
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZ>);
         //read the depth map
-    cv::Mat depthMap = cv::imread("/home/riccardozappa/esitmate-surface-normals-in-a-point-cloud/normalEstimation/result.png", cv::IMREAD_GRAYSCALE);
-    float focalLength = 525.0f;
-    int width = depthMap.cols;
-    int height = depthMap.rows;
-    cv::Mat customCameraMatrix = (cv::Mat_<float>(3, 3) << 
-    focalLength, 0, width / 2.0f, 
-    0, focalLength, height / 2.0f, 
-    0, 0, 1);
+    cv::Mat depthMap = cv::imread("/home/riccardozappa/estimate-surface-normals-in-a-point-cloud/normalEstimation/result.png", cv::IMREAD_GRAYSCALE);
 
-    cloud = depthMapToPointCloud(depthMap, customCameraMatrix);
+    if (depthMap.empty()) {
+        std::cerr << "Could not load depth map image." << std::endl;
+        return -1;
+    }
+
+    cloud = depthMapToPointCloud(depthMap);
 
     int numPoints = cloud->size();
     std::cout << "the point cloud has " << numPoints << " Points" << std::endl;
-
+   
 
     auto start = std::chrono::high_resolution_clock::now();
     // Create the normal estimation class, and pass the input dataset to it
@@ -67,13 +76,15 @@ int main()
 
     // Use all neighbors in a sphere of radius 3cm
     ne.setRadiusSearch (0.03);
-
+    auto end = std::chrono::high_resolution_clock::now();
+    float duration = 1000.0 * std::chrono::duration<float>(end - start).count();
+    std::cout << "Elapsed time: " << duration << " milliseconds\n";
     // Compute the features
     ne.compute (*cloud_normals);
 
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed = end - start;
-    std::cout << "Elapsed time: " << elapsed.count() << " seconds\n";
+    // auto end = std::chrono::high_resolution_clock::now();
+    // std::chrono::duration<double> elapsed = end - start;
+    // std::cout << "Elapsed time: " << elapsed.count() << " seconds\n";
 
     std::cout << "the size of the normals cloud is: " << cloud_normals->size() << std::endl; //should have the same size as the input cloud->size ()*
 
