@@ -33,7 +33,7 @@ inline void cusolverAssert(cusolverStatus_t status, const char *file, int line, 
 
 const int MAX_DIM = 3;   // Maximum dimensions of points (can be changed)
 const int BLOCK_SIZE = 256;
-const int N_POINTS = 1e4, N_QUERIES = 1e6, K_NEIGHBORS = 10, INF = 1e9, RANGE_MAX = 100, N_PRINT = 10;
+const int K_NEIGHBORS = 10, INF = 1e9, N_PRINT = 10;
 
 struct Point {
     float coords[MAX_DIM];  // Coordinates in MAX_DIM-dimensional space
@@ -148,7 +148,7 @@ __global__ void computeNormalsKernel(float* d_covarianceMatrices, float* d_eigen
                 printf("the first three eigenvectors are:");
                 printf("[");
                 for (int j = 0; j < 3; j++) {
-                    printf("%f ", d_eigenVectors[m + j * dim]);
+                    printf("%f ", d_eigenVectors[m * dim + j]);
                 }
                 printf("] \n");
             }
@@ -166,7 +166,7 @@ __global__ void computeNormalsKernel(float* d_covarianceMatrices, float* d_eigen
         }
         // Copy the normal vector (corresponding to the smallest eigenvalue)
         for (int d = 0; d < dim; d++) {
-            d_normals[idx].coords[d] = d_eigenVectors[idx * dim * dim + d * dim + minIndex];
+            d_normals[idx].coords[d] = d_eigenVectors[idx * dim * dim + d + minIndex * dim];
             if (idx == 0) { 
                 printf("Normal component [%d] = %f\n", d, d_normals[idx].coords[d]);
             }
@@ -188,7 +188,6 @@ __global__ void computeNormalsKernel(float* d_covarianceMatrices, float* d_eigen
         }
     }
 }
-
 
 __host__ void computeNormalsWithCuSolver(float* covarianceMatrices, Point* normals, int nPoints, int dim) {
     // cuSolver handle
@@ -220,6 +219,7 @@ __host__ void computeNormalsWithCuSolver(float* covarianceMatrices, Point* norma
         }
         std::cout << std::endl;
     }
+    
     // Workspace size
     int lda = dim;
     int workSize = 0;
@@ -228,7 +228,7 @@ __host__ void computeNormalsWithCuSolver(float* covarianceMatrices, Point* norma
 
     cudaMalloc((void**)&d_work, workSize * sizeof(float));
 
-    // Compute eigenvalues and eigenvectors for all matrices
+    // Compute eigenvalues and eigenvectors for all matrices:the eigenvectors will be computed in place in the d_covarianceMatrices variable
     CUSOLVER_CHECK(cusolverDnSsyevd(cusolverH, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_UPPER,
                      dim, d_covarianceMatrices, lda, d_eigenValues, d_work, workSize, d_info));
 
@@ -248,11 +248,11 @@ __host__ void computeNormalsWithCuSolver(float* covarianceMatrices, Point* norma
         std::cout << debugEigenvalues[i] << " ";
         std::cout << std::endl;
     }
-
+    
     // Launch kernel to compute normals
-    int threadsPerBlock = 256;
-    int blocks = (nPoints + threadsPerBlock - 1) / threadsPerBlock;
-    computeNormalsKernel<<<blocks, threadsPerBlock>>>(d_covarianceMatrices, d_eigenValues, d_covarianceMatrices, d_normals, nPoints, dim);
+    int blocks = (nPoints + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    computeNormalsKernel<<<blocks, BLOCK_SIZE>>>(d_covarianceMatrices, d_eigenValues, d_covarianceMatrices, d_normals, nPoints, dim);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         fprintf(stderr, "CUDA kernel launch error: %s\n", cudaGetErrorString(err));
@@ -424,16 +424,6 @@ int main() {
     free(h_points);
     
     return 0;
-}
-
-
-// Helper function to generate random points in MAX_DIM dimensions
-__host__ void generatePoints(Point *points, int n) {
-    for (int i = 0; i < n; i++) {
-        for (int d = 0; d < MAX_DIM; d++) {
-            points[i].coords[d] = static_cast<float>(rand() % RANGE_MAX + 1);
-        }
-    }
 }
 
 // Comparator for sorting points based on the current axis
