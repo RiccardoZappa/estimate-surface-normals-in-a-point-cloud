@@ -271,81 +271,146 @@ __host__ void computeNormalsWithCuSolver(float* covarianceMatrices, Point* norma
     cudaFree(d_work);
 }
 
+//__global__ void computeCovarianceMatrix(Point* points, Point* neighbors, float* covarianceMatrices, int numPoints, int kN) {
+//    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+//    if (idx >= numPoints) return;
+//
+//    float mean[3] = {0, 0, 0};
+//    
+//    // Debug: Print the first point and its neighbors
+//    if (idx == 0) {
+//        printf("Debug: First point coordinates: %f, %f, %f\n", 
+//               points[idx].coords[0], points[idx].coords[1], points[idx].coords[2]);
+//        printf("Debug: First point neighbors:\n");
+//        for (int k = 0; k < kN; k++) {
+//            Point neighbor = neighbors[idx * kN + k];
+//            printf("%f, %f, %f\n", neighbor.coords[0], neighbor.coords[1], neighbor.coords[2]);
+//        }
+//    }
+//    if (idx == 1) {
+//        printf("Debug: second point coordinates: %f, %f, %f\n", 
+//               points[idx].coords[0], points[idx].coords[1], points[idx].coords[2]);
+//        printf("Debug: second point neighbors:\n");
+//        for (int k = 0; k < kN; k++) {
+//            Point neighbor = neighbors[idx * kN + k];
+//            printf("%f, %f, %f\n", neighbor.coords[0], neighbor.coords[1], neighbor.coords[2]);
+//        }
+//    }
+//    if (idx == 2) {
+//        printf("Debug: third point coordinates: %f, %f, %f\n", 
+//               points[idx].coords[0], points[idx].coords[1], points[idx].coords[2]);
+//        printf("Debug: third point neighbors:\n");
+//        for (int k = 0; k < kN; k++) {
+//            Point neighbor = neighbors[idx * kN + k];
+//            printf("%f, %f, %f\n", neighbor.coords[0], neighbor.coords[1], neighbor.coords[2]);
+//        }
+//    }
+//    
+//    // Compute mean
+//    for (int k = 0; k < kN; k++) {
+//        Point neighbor = neighbors[idx * kN + k];
+//        for (int i = 0; i < 3; i++) {
+//            mean[i] += neighbor.coords[i];
+//        }
+//    }
+//    for (int i = 0; i < 3; i++) {
+//        mean[i] /= kN;
+//    }
+//
+//    // Compute covariance
+//    float cov[3][3] = {{0}};
+//    for (int k = 0; k < kN; k++) {
+//        Point neighbor = neighbors[idx * kN + k];
+//        for (int i = 0; i < 3; i++) {
+//            for (int j = 0; j < 3; j++) {
+//                cov[i][j] += (neighbor.coords[i] - mean[i]) * (neighbor.coords[j] - mean[j]);
+//            }
+//        }
+//    }
+//
+//    // Normalize and store
+//    const float epsilon = 1e-6f;
+//    for (int i = 0; i < 3; i++) {
+//        for (int j = 0; j < 3; j++) {
+//            covarianceMatrices[idx * 9 + i * 3 + j] = cov[i][j] / (kN - 1);
+//            if (i == j) covarianceMatrices[idx * 9 + i * 3 + j] += epsilon;
+//        }
+//    }
+//
+//    // Debug: Print the computed covariance matrix for the first point
+//    if (idx == 0) {
+//        printf("Debug: Computed covariance matrix for first point:\n");
+//        for (int i = 0; i < 3; i++) {
+//            for (int j = 0; j < 3; j++) {
+//                printf("%e ", covarianceMatrices[idx * 9 + i * 3 + j]);
+//            }
+//            printf("\n");
+//        }
+//    }
+//}
+
 __global__ void computeCovarianceMatrix(Point* points, Point* neighbors, float* covarianceMatrices, int numPoints, int kN) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= numPoints) return;
+    int pointIdx = blockIdx.x;  // Each block processes one point
+    int tid = threadIdx.x;      // Thread ID within the warp
 
-    float mean[3] = {0, 0, 0};
-    
-    // Debug: Print the first point and its neighbors
-    if (idx == 0) {
-        printf("Debug: First point coordinates: %f, %f, %f\n", 
-               points[idx].coords[0], points[idx].coords[1], points[idx].coords[2]);
-        printf("Debug: First point neighbors:\n");
-        for (int k = 0; k < kN; k++) {
-            Point neighbor = neighbors[idx * kN + k];
-            printf("%f, %f, %f\n", neighbor.coords[0], neighbor.coords[1], neighbor.coords[2]);
-        }
-    }
-    if (idx == 1) {
-        printf("Debug: second point coordinates: %f, %f, %f\n", 
-               points[idx].coords[0], points[idx].coords[1], points[idx].coords[2]);
-        printf("Debug: second point neighbors:\n");
-        for (int k = 0; k < kN; k++) {
-            Point neighbor = neighbors[idx * kN + k];
-            printf("%f, %f, %f\n", neighbor.coords[0], neighbor.coords[1], neighbor.coords[2]);
-        }
-    }
-    if (idx == 2) {
-        printf("Debug: third point coordinates: %f, %f, %f\n", 
-               points[idx].coords[0], points[idx].coords[1], points[idx].coords[2]);
-        printf("Debug: third point neighbors:\n");
-        for (int k = 0; k < kN; k++) {
-            Point neighbor = neighbors[idx * kN + k];
-            printf("%f, %f, %f\n", neighbor.coords[0], neighbor.coords[1], neighbor.coords[2]);
-        }
-    }
-    
-    // Compute mean
-    for (int k = 0; k < kN; k++) {
-        Point neighbor = neighbors[idx * kN + k];
-        for (int i = 0; i < 3; i++) {
-            mean[i] += neighbor.coords[i];
-        }
-    }
-    for (int i = 0; i < 3; i++) {
-        mean[i] /= kN;
-    }
+    if (pointIdx >= numPoints || tid >= kN) return;  // Out-of-bounds protection
 
-    // Compute covariance
-    float cov[3][3] = {{0}};
-    for (int k = 0; k < kN; k++) {
-        Point neighbor = neighbors[idx * kN + k];
-        for (int i = 0; i < 3; i++) {
-            for (int j = 0; j < 3; j++) {
-                cov[i][j] += (neighbor.coords[i] - mean[i]) * (neighbor.coords[j] - mean[j]);
-            }
-        }
-    }
+    // Step 1: Calculate mean (parallelized by threads within the warp)
+    __shared__ float mean[3];
+    if (tid < 3) mean[tid] = 0.0f;
+    __syncthreads();
 
-    // Normalize and store
-    const float epsilon = 1e-6f;
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
-            covarianceMatrices[idx * 9 + i * 3 + j] = cov[i][j] / (kN - 1);
-            if (i == j) covarianceMatrices[idx * 9 + i * 3 + j] += epsilon;
-        }
-    }
+    // Each thread handles one neighbor
+    Point neighbor = neighbors[pointIdx * kN + tid];
 
-    // Debug: Print the computed covariance matrix for the first point
-    if (idx == 0) {
-        printf("Debug: Computed covariance matrix for first point:\n");
-        for (int i = 0; i < 3; i++) {
-            for (int j = 0; j < 3; j++) {
-                printf("%e ", covarianceMatrices[idx * 9 + i * 3 + j]);
-            }
-            printf("\n");
-        }
+    // Accumulate each neighbor's coordinates to the mean
+    atomicAdd(&mean[0], neighbor.coords[0]);
+    atomicAdd(&mean[1], neighbor.coords[1]);
+    atomicAdd(&mean[2], neighbor.coords[2]);
+
+    __syncthreads();
+
+    // Compute the mean for this point (only the first 3 threads handle this)
+    if (tid < 3) {
+        mean[tid] /= kN;
+    }
+    __syncthreads();
+
+    // Step 2: Calculate the covariance matrix (each thread handles one neighbor)
+    __shared__ float cov[3][3];
+    if (tid < 9) {  // Initialize the shared covariance matrix
+        cov[tid / 3][tid % 3] = 0.0f;
+    }
+    __syncthreads();
+
+    // Difference from the mean
+    float diff[3] = {
+        neighbor.coords[0] - mean[0],
+        neighbor.coords[1] - mean[1],
+        neighbor.coords[2] - mean[2]
+    };
+
+    // Accumulate to the covariance matrix in parallel
+    atomicAdd(&cov[0][0], diff[0] * diff[0]);
+    atomicAdd(&cov[0][1], diff[0] * diff[1]);
+    atomicAdd(&cov[0][2], diff[0] * diff[2]);
+    atomicAdd(&cov[1][0], diff[1] * diff[0]);
+    atomicAdd(&cov[1][1], diff[1] * diff[1]);
+    atomicAdd(&cov[1][2], diff[1] * diff[2]);
+    atomicAdd(&cov[2][0], diff[2] * diff[0]);
+    atomicAdd(&cov[2][1], diff[2] * diff[1]);
+    atomicAdd(&cov[2][2], diff[2] * diff[2]);
+
+    __syncthreads();
+
+    // Step 3: Normalize and store the covariance matrix
+    if (tid < 9) {  // Each thread stores one element of the covariance matrix
+        int i = tid / 3;
+        int j = tid % 3;
+        covarianceMatrices[pointIdx * 9 + i * 3 + j] = cov[i][j] / (kN - 1);
+
+        // Add small value to diagonal for numerical stability
+        if (i == j) covarianceMatrices[pointIdx * 9 + i * 3 + j] += 1e-6f;
     }
 }
 
@@ -389,9 +454,9 @@ int main() {
 
     std::cout << "building KdTree"<< std::endl;
     buildKDTree(h_points, tree, numPoints, TREE_SIZE);
-    std::cout << "0: " << tree[24].point.coords[0] << " 1: " << tree[24].point.coords[1] << " 2: "<<tree[24].point.coords[2] << std::endl;
     int numBlocks = (numPoints + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
+    
     size_t newStackSize = 16 * 1024;  // 16 KB to start
     cudaDeviceSetLimit(cudaLimitStackSize, newStackSize);
 
@@ -401,10 +466,7 @@ int main() {
     kNearestNeighborsGPU<<<numBlocks, BLOCK_SIZE>>>(tree, TREE_SIZE, queries, results, numPoints, K_NEIGHBORS);
     eChk(cudaDeviceSynchronize());
     
-    auto end = std::chrono::system_clock::now();
-    float duration = 1000.0 * std::chrono::duration<float>(end - start).count();
 
-    std::cout << "Elapsed time in milliseconds : " << duration << "ms\n\n";
 
     //printResults(queries, results, 0, numPoints);
     float* covarianceMatrices;
@@ -415,37 +477,39 @@ int main() {
     eChk(cudaMallocManaged(&normals, numPoints * sizeof(Point)));
 
     // Step 1: Compute covariance matrices
-    computeCovarianceMatrix<<<(numPoints + 255) / 256, 256>>>(queries, results, covarianceMatrices, numPoints, K_NEIGHBORS);
+    computeCovarianceMatrix<<<numPoints , 32>>>(queries, results, covarianceMatrices, numPoints, K_NEIGHBORS);
     eChk(cudaDeviceSynchronize());
     
     // Debug: Print first covariance matrix
     float debugMatrix[27];
     cudaMemcpy(debugMatrix, covarianceMatrices, 27 * sizeof(float), cudaMemcpyDeviceToHost);
-    // std::cout << "First covariance matrix:" << std::endl;
-    // for (int i = 0; i < 3; i++) {
-    //     for (int j = 0; j < 3; j++) {
-    //         std::cout << debugMatrix[i*3 + j] << " ";
-    //     }
-    //     std::cout << std::endl;
-    // }
-    // std::cout << "Second covariance matrix:" << std::endl;
-    // for (int k = 3; k < 6; k++) {
-    //     for (int m = 0; m < 3; m++) {
-    //         std::cout << debugMatrix[k*3 + m] << " ";
-    //     }
-    //     std::cout << std::endl;
-    // }
-
-
-    // std::cout << "Third covariance matrix:" << std::endl;
-    // for (int u = 3; u < 6; u++) {
-    //     for (int n = 0; n < 3; n++) {
-    //         std::cout << debugMatrix[u*3 + n] << " ";
-    //     }
-    //     std::cout << std::endl;
-    // }
+    std::cout << "First covariance matrix:" << std::endl;
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            std::cout << debugMatrix[i*3 + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+    std::cout << "Second covariance matrix:" << std::endl;
+    for (int k = 3; k < 6; k++) {
+        for (int m = 0; m < 3; m++) {
+            std::cout << debugMatrix[k*3 + m] << " ";
+        }
+        std::cout << std::endl;
+    }
+        std::cout << "Third covariance matrix:" << std::endl;
+    for (int u = 3; u < 6; u++) {
+        for (int n = 0; n < 3; n++) {
+            std::cout << debugMatrix[u*3 + n] << " ";
+        }
+        std::cout << std::endl;
+    }
     computeNormalsWithCuSolver(covarianceMatrices, normals, numPoints, MAX_DIM);
 
+    auto end = std::chrono::system_clock::now();
+    float duration = 1000.0 * std::chrono::duration<float>(end - start).count();
+
+    std::cout << "Elapsed time in milliseconds : " << duration << "ms\n\n";
     printPoints(normals, 10);
 
     eChk(cudaFree(results));
@@ -568,22 +632,6 @@ __global__ void kNearestNeighborsGPU(KDNode *tree, int treeSize, Point *queries,
         }
 
         findKNearestNeighbors(tree, treeSize, 1, 0, queries[index], neighbors, k);
-        if (index == 1)
-        {
-            printf("findKNearestNeighbors 1\n");
-            for (int m = 0; m < k; m++) {
-                Point neighbor = neighbors[m];
-                printf("%f, %f, %f\n", neighbor.coords[0], neighbor.coords[1], neighbor.coords[2]);
-            }
-        }
-        if (index == 2)
-        {
-            printf("findKNearestNeighbors 3\n");
-            for (int m = 0; m < k; m++) {
-                Point neighbor = neighbors[m];
-                printf("%f, %f, %f\n", neighbor.coords[0], neighbor.coords[1], neighbor.coords[2]);
-            }
-        }
         // Copy the neighbors to the results array
         for (int i = 0; i < k; i++) {
             results[index * k + i] = neighbors[i];
