@@ -32,7 +32,7 @@ inline void cusolverAssert(cusolverStatus_t status, const char *file, int line, 
 }
 
 const int MAX_DIM = 3;   // Maximum dimensions of points (can be changed)
-const int BLOCK_SIZE = 256;
+const int BLOCK_SIZE = 512;
 const int K_NEIGHBORS = 10, INF = 1e9, N_PRINT = 10;
 
 struct Point {
@@ -287,6 +287,24 @@ __global__ void computeCovarianceMatrix(Point* points, Point* neighbors, float* 
             printf("%f, %f, %f\n", neighbor.coords[0], neighbor.coords[1], neighbor.coords[2]);
         }
     }
+    if (idx == 1) {
+        printf("Debug: second point coordinates: %f, %f, %f\n", 
+               points[idx].coords[0], points[idx].coords[1], points[idx].coords[2]);
+        printf("Debug: second point neighbors:\n");
+        for (int k = 0; k < kN; k++) {
+            Point neighbor = neighbors[idx * kN + k];
+            printf("%f, %f, %f\n", neighbor.coords[0], neighbor.coords[1], neighbor.coords[2]);
+        }
+    }
+    if (idx == 2) {
+        printf("Debug: third point coordinates: %f, %f, %f\n", 
+               points[idx].coords[0], points[idx].coords[1], points[idx].coords[2]);
+        printf("Debug: third point neighbors:\n");
+        for (int k = 0; k < kN; k++) {
+            Point neighbor = neighbors[idx * kN + k];
+            printf("%f, %f, %f\n", neighbor.coords[0], neighbor.coords[1], neighbor.coords[2]);
+        }
+    }
     
     // Compute mean
     for (int k = 0; k < kN; k++) {
@@ -334,19 +352,16 @@ __global__ void computeCovarianceMatrix(Point* points, Point* neighbors, float* 
 int main() {
 
         // Load the depth map image using OpenCV
-    cv::Mat depthMap = cv::imread("/home/riccardozappa/estimate-surface-normals-in-a-point-cloud/normalEstimation/result.png", cv::IMREAD_GRAYSCALE);
+    cv::Mat depthMap = cv::imread("/home/riccardozappa/estimate-surface-normals-in-a-point-cloud/normalEstimation/depth_map_50000_points.png", cv::IMREAD_GRAYSCALE);
 
     if (depthMap.empty()) {
         std::cerr << "Could not load depth map image." << std::endl;
         return -1;
     }
+    auto start = std::chrono::high_resolution_clock::now();
 
     // Convert the depth map to a point cloud using PCL
     pcl::PointCloud<pcl::PointXYZ>::Ptr pointCloud = depthMapToPointCloud(depthMap);
-
-    // Save the point cloud to a PCD file
-    pcl::io::savePCDFileASCII("point_cloud_output.pcd", *pointCloud);
-    std::cout << "Saved point cloud with " << pointCloud->points.size() << " points." << std::endl;
 
     int numPoints = pointCloud->size();
     std::cout << "the point cloud has " << numPoints << " Points" << std::endl;
@@ -374,9 +389,11 @@ int main() {
 
     std::cout << "building KdTree"<< std::endl;
     buildKDTree(h_points, tree, numPoints, TREE_SIZE);
-    
-    auto start = std::chrono::high_resolution_clock::now();
+    std::cout << "0: " << tree[24].point.coords[0] << " 1: " << tree[24].point.coords[1] << " 2: "<<tree[24].point.coords[2] << std::endl;
     int numBlocks = (numPoints + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    size_t newStackSize = 16 * 1024;  // 16 KB to start
+    cudaDeviceSetLimit(cudaLimitStackSize, newStackSize);
 
     Point *results;
     eChk(cudaMallocManaged(&results, numPoints * K_NEIGHBORS * sizeof(Point)));
@@ -402,16 +419,31 @@ int main() {
     eChk(cudaDeviceSynchronize());
     
     // Debug: Print first covariance matrix
-    float debugMatrix[9];
-    cudaMemcpy(debugMatrix, covarianceMatrices, 9 * sizeof(float), cudaMemcpyDeviceToHost);
-    std::cout << "First covariance matrix:" << std::endl;
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
-            std::cout << debugMatrix[i*3 + j] << " ";
-        }
-        std::cout << std::endl;
-    }
+    float debugMatrix[27];
+    cudaMemcpy(debugMatrix, covarianceMatrices, 27 * sizeof(float), cudaMemcpyDeviceToHost);
+    // std::cout << "First covariance matrix:" << std::endl;
+    // for (int i = 0; i < 3; i++) {
+    //     for (int j = 0; j < 3; j++) {
+    //         std::cout << debugMatrix[i*3 + j] << " ";
+    //     }
+    //     std::cout << std::endl;
+    // }
+    // std::cout << "Second covariance matrix:" << std::endl;
+    // for (int k = 3; k < 6; k++) {
+    //     for (int m = 0; m < 3; m++) {
+    //         std::cout << debugMatrix[k*3 + m] << " ";
+    //     }
+    //     std::cout << std::endl;
+    // }
 
+
+    // std::cout << "Third covariance matrix:" << std::endl;
+    // for (int u = 3; u < 6; u++) {
+    //     for (int n = 0; n < 3; n++) {
+    //         std::cout << debugMatrix[u*3 + n] << " ";
+    //     }
+    //     std::cout << std::endl;
+    // }
     computeNormalsWithCuSolver(covarianceMatrices, normals, numPoints, MAX_DIM);
 
     printPoints(normals, 10);
@@ -478,8 +510,11 @@ struct KNNComparator {
  __device__ void findKNearestNeighbors(KDNode *tree, int treeSize, int treeNode, int depth, Point query, Point *neighbors, int k) {
     // Base case
     if (treeNode >= treeSize) return;
-
     KDNode node = tree[treeNode];
+    // printf("treeNode id: %d\n", treeNode);
+    // printf("%f, %f, %f\n", query.coords[0], query.coords[1], query.coords[2]);
+    // printf("%f, %f, %f\n", node.point.coords[0], node.point.coords[1], node.point.coords[2]);
+    // printf("node axis: %d\n", node.axis);
     if (node.axis == -1) return;
 
     bool near = false;
@@ -506,13 +541,14 @@ struct KNNComparator {
         }
         neighbors[index] = node.point;
     }
-
+    // printf("query coord confronted: %f\n", query.coords[node.axis]);
+    // printf("node point coord confronted: %f\n", node.point.coords[node.axis]);
      // Find the next subtree to search
     int nextAxis = (depth + 1) % MAX_DIM;
     if (query.coords[node.axis] < node.point.coords[node.axis]) {
-         findKNearestNeighbors(tree, treeSize, treeNode * 2, depth + 1, query, neighbors, k);
+         findKNearestNeighbors(tree, treeSize, treeNode * 2, nextAxis, query, neighbors, k);
     } else {
-         findKNearestNeighbors(tree, treeSize, treeNode * 2 + 1, depth + 1, query, neighbors, k);
+         findKNearestNeighbors(tree, treeSize, treeNode * 2 + 1, nextAxis, query, neighbors, k);
     }
  }
 
@@ -530,11 +566,28 @@ __global__ void kNearestNeighborsGPU(KDNode *tree, int treeSize, Point *queries,
             neighbors[i].coords[1] = INF;
             neighbors[i].coords[2] = INF;  // Assuming Point() initializes it to an invalid point
         }
-        findKNearestNeighbors(tree, treeSize, 1, 0, queries[index], neighbors, k);
 
+        findKNearestNeighbors(tree, treeSize, 1, 0, queries[index], neighbors, k);
+        if (index == 1)
+        {
+            printf("findKNearestNeighbors 1\n");
+            for (int m = 0; m < k; m++) {
+                Point neighbor = neighbors[m];
+                printf("%f, %f, %f\n", neighbor.coords[0], neighbor.coords[1], neighbor.coords[2]);
+            }
+        }
+        if (index == 2)
+        {
+            printf("findKNearestNeighbors 3\n");
+            for (int m = 0; m < k; m++) {
+                Point neighbor = neighbors[m];
+                printf("%f, %f, %f\n", neighbor.coords[0], neighbor.coords[1], neighbor.coords[2]);
+            }
+        }
         // Copy the neighbors to the results array
         for (int i = 0; i < k; i++) {
             results[index * k + i] = neighbors[i];
+            
         }
     }
 } 
