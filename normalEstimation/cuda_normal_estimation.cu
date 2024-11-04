@@ -417,7 +417,7 @@ __global__ void computeCovarianceMatrix(Point* points, Point* neighbors, float* 
 int main() {
 
         // Load the depth map image using OpenCV
-    cv::Mat depthMap = cv::imread("/home/riccardozappa/estimate-surface-normals-in-a-point-cloud/normalEstimation/depth_map_100k.png", cv::IMREAD_GRAYSCALE);
+    cv::Mat depthMap = cv::imread("/home/riccardozappa/estimate-surface-normals-in-a-point-cloud/normalEstimation/depth_map_250k.png", cv::IMREAD_GRAYSCALE);
 
     if (depthMap.empty()) {
         std::cerr << "Could not load depth map image." << std::endl;
