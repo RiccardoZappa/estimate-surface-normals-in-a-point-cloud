@@ -48,7 +48,7 @@ int main()
 {
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZ>);
         //read the depth map
-    cv::Mat depthMap = cv::imread("/home/riccardozappa/estimate-surface-normals-in-a-point-cloud/normalEstimation/depth_map_50000_points.png", cv::IMREAD_GRAYSCALE);
+    cv::Mat depthMap = cv::imread("/home/riccardozappa/estimate-surface-normals-in-a-point-cloud/normalEstimation/depth_map_100k.png", cv::IMREAD_GRAYSCALE);
 
     if (depthMap.empty()) {
         std::cerr << "Could not load depth map image." << std::endl;
@@ -75,7 +75,7 @@ int main()
     pcl::PointCloud<pcl::Normal>::Ptr cloud_normals (new pcl::PointCloud<pcl::Normal>);
 
     // Use all neighbors in a sphere of radius 3cm
-    ne.setRadiusSearch (7);
+    ne.setRadiusSearch (12);
     
     // Compute the features
     ne.compute (*cloud_normals);

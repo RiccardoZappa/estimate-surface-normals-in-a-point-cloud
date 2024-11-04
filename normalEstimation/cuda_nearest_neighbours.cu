@@ -417,19 +417,19 @@ __global__ void computeCovarianceMatrix(Point* points, Point* neighbors, float* 
 int main() {
 
         // Load the depth map image using OpenCV
-    cv::Mat depthMap = cv::imread("/home/riccardozappa/estimate-surface-normals-in-a-point-cloud/normalEstimation/depth_map_50000_points.png", cv::IMREAD_GRAYSCALE);
+    cv::Mat depthMap = cv::imread("/home/riccardozappa/estimate-surface-normals-in-a-point-cloud/normalEstimation/depth_map_100k.png", cv::IMREAD_GRAYSCALE);
 
     if (depthMap.empty()) {
         std::cerr << "Could not load depth map image." << std::endl;
         return -1;
     }
-    auto start = std::chrono::high_resolution_clock::now();
 
     // Convert the depth map to a point cloud using PCL
     pcl::PointCloud<pcl::PointXYZ>::Ptr pointCloud = depthMapToPointCloud(depthMap);
 
     int numPoints = pointCloud->size();
     std::cout << "the point cloud has " << numPoints << " Points" << std::endl;
+    auto start = std::chrono::high_resolution_clock::now();
 
     Point* h_points = (Point*)malloc(numPoints * sizeof(Point));
     Point* queries;
@@ -447,8 +447,6 @@ int main() {
     std::cout << "tree size: " << TREE_SIZE << std::endl;
     
     KDNode *tree;
-    
-
     
     eChk(cudaMallocManaged(&tree, TREE_SIZE * sizeof(KDNode)));
 
