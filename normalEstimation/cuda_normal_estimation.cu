@@ -145,22 +145,6 @@ void savePointCloudToStructCUDA(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, Point
 __global__ void computeNormalsKernel(float* d_covarianceMatrices, float* d_eigenValues, float* d_eigenVectors, Point* d_normals, int nPoints, int dim) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < nPoints) {
-        //to debug the eigenvalues given
-        if (idx == 0){
-            printf("the first three eigenvalues are:");
-            for (int i = 0; i < 3; i++) {
-                printf("%f \n", d_eigenValues[i]);
-            }
-            for(int m = 0; m < 3; m++)
-            {
-                printf("the first three eigenvectors are:");
-                printf("[");
-                for (int j = 0; j < 3; j++) {
-                    printf("%f ", d_eigenVectors[m * dim + j]);
-                }
-                printf("] \n");
-            }
-        }
         // Find the eigenvector corresponding to the smallest eigenvalue
         int minIndex = 0;
         for (int j = 1; j < dim; j++) {
@@ -168,16 +152,9 @@ __global__ void computeNormalsKernel(float* d_covarianceMatrices, float* d_eigen
                 minIndex = j;
             }
         }
-        if (idx == 0) { 
-            printf("Point %d: Min eigenvalue at index %d\n", idx, minIndex);
-            printf("Eigenvalue: %f\n", d_eigenValues[idx * dim + minIndex]);
-        }
         // Copy the normal vector (corresponding to the smallest eigenvalue)
         for (int d = 0; d < dim; d++) {
             d_normals[idx].coords[d] = d_eigenVectors[idx * dim * dim + d + minIndex * dim];
-            if (idx == 0) { 
-                printf("Normal component [%d] = %f\n", d, d_normals[idx].coords[d]);
-            }
         }
     }
 }
@@ -217,15 +194,6 @@ __host__ void computeNormalsWithCuSolver(float* covarianceMatrices, Point* norma
     // Check if the operation was successful
     int info;
     eChk(cudaMemcpy(&info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
-
-    //to debug the eigenvalues
-    float debugEigenvalues[3];
-    eChk(cudaMemcpy(debugEigenvalues, d_eigenValues, 3 * sizeof(float), cudaMemcpyDeviceToHost));
-    std::cout << "first three eigenvalues:" << std::endl;
-    for (int i = 0; i < 3; i++) {
-        std::cout << debugEigenvalues[i] << " ";
-        std::cout << std::endl;
-    }
     
     // Launch kernel to compute normals
     int blocks = (nPoints + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -327,48 +295,34 @@ int main() {
 
     // Convert the depth map to a point cloud using PCL
     pcl::PointCloud<pcl::PointXYZ>::Ptr pointCloud = depthMapToPointCloud(depthMap);
-
-    int numPoints = pointCloud->size();
-    std::cout << "the point cloud has " << numPoints << " Points" << std::endl;
-
+    auto numPoints = pointCloud->size();
     Point* h_points = (Point*)malloc(numPoints * sizeof(Point));
     Point* queries;
 
     eChk(cudaMallocManaged(&queries, numPoints * sizeof(Point)));
 
-    auto startPointCloud = std::chrono::high_resolution_clock::now();
     savePointCloudToStructCUDA(pointCloud, h_points, queries);
-    auto endPointCloud = std::chrono::system_clock::now();
-    // printPoints(h_points, numPoints);
 
     int TREE_SIZE = 1;
     while (TREE_SIZE < numPoints) TREE_SIZE <<= 1;
-
-    std::cout << "tree size: " << TREE_SIZE << std::endl;
     
     KDNode *tree;
     
     eChk(cudaMallocManaged(&tree, TREE_SIZE * sizeof(KDNode)));
 
-    auto startTree = std::chrono::high_resolution_clock::now();
-    std::cout << "building KdTree"<< std::endl;
     buildKDTree(h_points, tree, numPoints, TREE_SIZE);
     int numBlocks = (numPoints + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    auto endTree = std::chrono::system_clock::now();
     
     size_t newStackSize = 16 * 1024;  // 16 KB to start
     cudaDeviceSetLimit(cudaLimitStackSize, newStackSize);
 
     Point *results;
     eChk(cudaMallocManaged(&results, numPoints * K_NEIGHBORS * sizeof(Point)));
-    auto startNeighbour = std::chrono::high_resolution_clock::now();
+
     std::cout << "serarching for k nearest neighbours"<< std::endl;
     kNearestNeighborsGPU<<<numBlocks, BLOCK_SIZE>>>(tree, TREE_SIZE, queries, results, numPoints, K_NEIGHBORS);
     eChk(cudaDeviceSynchronize());
-    auto endNeighbour = std::chrono::system_clock::now();
 
-
-    printResults(queries, results, 0, 5);
     float* covarianceMatrices;
     Point* normals;
 
@@ -376,41 +330,15 @@ int main() {
     eChk(cudaMallocManaged(&covarianceMatrices, numPoints * MAX_DIM * MAX_DIM * sizeof(float)));
     eChk(cudaMallocManaged(&normals, numPoints * sizeof(Point)));
 
-    auto startCovariance = std::chrono::high_resolution_clock::now();
     // Step 1: Compute covariance matrices
     computeCovarianceMatrix<<<numPoints , 32>>>(queries, results, covarianceMatrices, numPoints, K_NEIGHBORS);
     eChk(cudaDeviceSynchronize());
-    auto endCovariance = std::chrono::system_clock::now();
 
-    // Debug: Print first covariance matrix
-    float debugMatrix[9];
-    cudaMemcpy(debugMatrix, covarianceMatrices, 9 * sizeof(float), cudaMemcpyDeviceToHost);
-    std::cout << "First covariance matrix:" << std::endl;
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
-            std::cout << debugMatrix[i*3 + j] << " ";
-        }
-        std::cout << std::endl;
-    }
-    auto startNormals = std::chrono::high_resolution_clock::now();
     computeNormalsWithCuSolver(covarianceMatrices, normals, numPoints, MAX_DIM);
-    auto endNormals = std::chrono::system_clock::now();
 
     auto end = std::chrono::system_clock::now();
 
-    float durationPointCloud = 1000.0 * std::chrono::duration<float>(endPointCloud - startPointCloud).count();
-    float durationTree = 1000.0 * std::chrono::duration<float>(endTree - startTree).count();
-    float durationNeighbour = 1000.0 * std::chrono::duration<float>(endNeighbour - startNeighbour).count();
-    float durationCovariance = 1000.0 * std::chrono::duration<float>(endCovariance - startCovariance).count();
-    float durationNormals = 1000.0 * std::chrono::duration<float>(endNormals - startNormals).count();
-
     float duration = 1000.0 * std::chrono::duration<float>(end - start).count();
-    
-    std::cout << "Elapsed time in milliseconds PointCloud : " << durationPointCloud << "ms\n\n";
-    std::cout << "Elapsed time in milliseconds Tree : " << durationTree << "ms\n\n";
-    std::cout << "Elapsed time in milliseconds neighbours: " << durationNeighbour << "ms\n\n";
-    std::cout << "Elapsed time in milliseconds Covariance: " << durationCovariance << "ms\n\n";
-    std::cout << "Elapsed time in milliseconds Normals: " << durationNormals << "ms\n\n";
 
     std::cout << "Elapsed time in milliseconds full: " << duration << "ms\n\n";
 
