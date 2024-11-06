@@ -31,9 +31,10 @@ inline void cusolverAssert(cusolverStatus_t status, const char *file, int line, 
     }
 }
 
+const char* imagePath = "/home/riccardozappa/estimate-surface-normals-in-a-point-cloud/normalEstimation/images/depth_map_1m.png";
 const int MAX_DIM = 3;   // Maximum dimensions of points (can be changed)
 const int BLOCK_SIZE = 512;
-const int K_NEIGHBORS = 10, INF = 1e9, N_PRINT = 10;
+const int K_NEIGHBORS = 10, INF = 1e9;
 
 struct Point {
     float coords[MAX_DIM];  // Coordinates in MAX_DIM-dimensional space
@@ -95,16 +96,20 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr depthMapToPointCloud(const cv::Mat& depthMap
 
 
 // CUDA kernel to convert pcl::PointXYZ to Point
-__global__ void convertPointCloudKernel(const pcl::PointXYZ* inputPoints, Point* outputPoints, int numPoints) {
+__global__ void convertPointCloudKernel(const pcl::PointXYZ* inputPoints, Point* outputPoints, Point* outputQueries, int numPoints) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < numPoints) {
         outputPoints[idx].coords[0] = inputPoints[idx].x;  // x coordinate
         outputPoints[idx].coords[1] = inputPoints[idx].y;  // y coordinate
         outputPoints[idx].coords[2] = inputPoints[idx].z;  // z coordinate
+        //queries
+        outputQueries[idx].coords[0] = inputPoints[idx].x;  // x coordinate
+        outputQueries[idx].coords[1] = inputPoints[idx].y;  // y coordinate
+        outputQueries[idx].coords[2] = inputPoints[idx].z;  // z coordinate
     }
 }
 
-void savePointCloudToStructCUDA(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, Point* points) {
+void savePointCloudToStructCUDA(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, Point* points, Point* queries) {
     int numPoints = cloud->size();
 
     // Allocate host memory for the output points
@@ -112,26 +117,29 @@ void savePointCloudToStructCUDA(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, Point
     // Allocate device memory
     pcl::PointXYZ* deviceInputPoints;
     Point* deviceOutputPoints;
+    Point* deviceOutputQueries;
 
     cudaMalloc((void**)&deviceInputPoints, numPoints * sizeof(pcl::PointXYZ));
     cudaMalloc((void**)&deviceOutputPoints, numPoints * sizeof(Point));
+    cudaMalloc((void**)&deviceOutputQueries, numPoints * sizeof(Point));
 
     // Copy input point cloud data to the device
     cudaMemcpy(deviceInputPoints, cloud->points.data(), numPoints * sizeof(pcl::PointXYZ), cudaMemcpyHostToDevice);
 
     // Define block size and grid size
-    int blockSize = 256;
-    int gridSize = (numPoints + blockSize - 1) / blockSize;
+    int gridSize = (numPoints + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
     // Launch the CUDA kernel
-    convertPointCloudKernel<<<gridSize, blockSize>>>(deviceInputPoints, deviceOutputPoints, numPoints);
+    convertPointCloudKernel<<<gridSize, BLOCK_SIZE>>>(deviceInputPoints, deviceOutputPoints, deviceOutputQueries, numPoints);
 
     // Copy the results back to the host
     cudaMemcpy(points, deviceOutputPoints, numPoints * sizeof(Point), cudaMemcpyDeviceToHost);
+    cudaMemcpy(queries, deviceOutputQueries, numPoints * sizeof(Point), cudaMemcpyDeviceToHost);
 
     // Free device memory
     cudaFree(deviceInputPoints);
     cudaFree(deviceOutputPoints);
+    cudaFree(deviceOutputQueries);
 }
 
 __global__ void computeNormalsKernel(float* d_covarianceMatrices, float* d_eigenValues, float* d_eigenVectors, Point* d_normals, int nPoints, int dim) {
@@ -171,21 +179,6 @@ __global__ void computeNormalsKernel(float* d_covarianceMatrices, float* d_eigen
                 printf("Normal component [%d] = %f\n", d, d_normals[idx].coords[d]);
             }
         }
-        // Normalize the normal vector
-        float norm = 0.0f;
-        for (int d = 0; d < dim; d++) {
-            norm += d_normals[idx].coords[d] * d_normals[idx].coords[d];
-        }
-        norm = sqrtf(norm);
-        if (idx == 0) { 
-            printf("Norm before normalization: %f\n", norm);
-        }
-        for (int d = 0; d < dim; d++) {
-            d_normals[idx].coords[d] /= norm;
-            if (idx == 0) { 
-                printf("Normalized normal component [%d] = %f\n", d, d_normals[idx].coords[d]);
-            }
-        }
     }
 }
 
@@ -208,17 +201,6 @@ __host__ void computeNormalsWithCuSolver(float* covarianceMatrices, Point* norma
 
     // Copy data to device
     eChk(cudaMemcpy(d_covarianceMatrices, covarianceMatrices, nPoints * dim * dim * sizeof(float), cudaMemcpyHostToDevice));
-   
-   // Debug: Print covariance matrix passed
-    float debugMatrix[9];
-    cudaMemcpy(debugMatrix, covarianceMatrices, 9 * sizeof(float), cudaMemcpyDeviceToHost);
-    std::cout << "covariance matrix passed to debug:" << std::endl;
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
-            std::cout << debugMatrix[i*3 + j] << " ";
-        }
-        std::cout << std::endl;
-    }
     
     // Workspace size
     int lda = dim;
@@ -234,15 +216,11 @@ __host__ void computeNormalsWithCuSolver(float* covarianceMatrices, Point* norma
 
     // Check if the operation was successful
     int info;
-    cudaMemcpy(&info, d_info, sizeof(int), cudaMemcpyDeviceToHost);
-    if (info != 0) {
-        std::cerr << "Eigenvalue decomposition failed with error " << info << std::endl;
-        // Handle error...
-    }
+    eChk(cudaMemcpy(&info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
 
     //to debug the eigenvalues
     float debugEigenvalues[3];
-    cudaMemcpy(debugEigenvalues, d_eigenValues, 3 * sizeof(float), cudaMemcpyDeviceToHost);
+    eChk(cudaMemcpy(debugEigenvalues, d_eigenValues, 3 * sizeof(float), cudaMemcpyDeviceToHost));
     std::cout << "first three eigenvalues:" << std::endl;
     for (int i = 0; i < 3; i++) {
         std::cout << debugEigenvalues[i] << " ";
@@ -270,84 +248,6 @@ __host__ void computeNormalsWithCuSolver(float* covarianceMatrices, Point* norma
     cudaFree(d_info);
     cudaFree(d_work);
 }
-
-//__global__ void computeCovarianceMatrix(Point* points, Point* neighbors, float* covarianceMatrices, int numPoints, int kN) {
-//    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-//    if (idx >= numPoints) return;
-//
-//    float mean[3] = {0, 0, 0};
-//    
-//    // Debug: Print the first point and its neighbors
-//    if (idx == 0) {
-//        printf("Debug: First point coordinates: %f, %f, %f\n", 
-//               points[idx].coords[0], points[idx].coords[1], points[idx].coords[2]);
-//        printf("Debug: First point neighbors:\n");
-//        for (int k = 0; k < kN; k++) {
-//            Point neighbor = neighbors[idx * kN + k];
-//            printf("%f, %f, %f\n", neighbor.coords[0], neighbor.coords[1], neighbor.coords[2]);
-//        }
-//    }
-//    if (idx == 1) {
-//        printf("Debug: second point coordinates: %f, %f, %f\n", 
-//               points[idx].coords[0], points[idx].coords[1], points[idx].coords[2]);
-//        printf("Debug: second point neighbors:\n");
-//        for (int k = 0; k < kN; k++) {
-//            Point neighbor = neighbors[idx * kN + k];
-//            printf("%f, %f, %f\n", neighbor.coords[0], neighbor.coords[1], neighbor.coords[2]);
-//        }
-//    }
-//    if (idx == 2) {
-//        printf("Debug: third point coordinates: %f, %f, %f\n", 
-//               points[idx].coords[0], points[idx].coords[1], points[idx].coords[2]);
-//        printf("Debug: third point neighbors:\n");
-//        for (int k = 0; k < kN; k++) {
-//            Point neighbor = neighbors[idx * kN + k];
-//            printf("%f, %f, %f\n", neighbor.coords[0], neighbor.coords[1], neighbor.coords[2]);
-//        }
-//    }
-//    
-//    // Compute mean
-//    for (int k = 0; k < kN; k++) {
-//        Point neighbor = neighbors[idx * kN + k];
-//        for (int i = 0; i < 3; i++) {
-//            mean[i] += neighbor.coords[i];
-//        }
-//    }
-//    for (int i = 0; i < 3; i++) {
-//        mean[i] /= kN;
-//    }
-//
-//    // Compute covariance
-//    float cov[3][3] = {{0}};
-//    for (int k = 0; k < kN; k++) {
-//        Point neighbor = neighbors[idx * kN + k];
-//        for (int i = 0; i < 3; i++) {
-//            for (int j = 0; j < 3; j++) {
-//                cov[i][j] += (neighbor.coords[i] - mean[i]) * (neighbor.coords[j] - mean[j]);
-//            }
-//        }
-//    }
-//
-//    // Normalize and store
-//    const float epsilon = 1e-6f;
-//    for (int i = 0; i < 3; i++) {
-//        for (int j = 0; j < 3; j++) {
-//            covarianceMatrices[idx * 9 + i * 3 + j] = cov[i][j] / (kN - 1);
-//            if (i == j) covarianceMatrices[idx * 9 + i * 3 + j] += epsilon;
-//        }
-//    }
-//
-//    // Debug: Print the computed covariance matrix for the first point
-//    if (idx == 0) {
-//        printf("Debug: Computed covariance matrix for first point:\n");
-//        for (int i = 0; i < 3; i++) {
-//            for (int j = 0; j < 3; j++) {
-//                printf("%e ", covarianceMatrices[idx * 9 + i * 3 + j]);
-//            }
-//            printf("\n");
-//        }
-//    }
-//}
 
 __global__ void computeCovarianceMatrix(Point* points, Point* neighbors, float* covarianceMatrices, int numPoints, int kN) {
     int pointIdx = blockIdx.x;  // Each block processes one point
@@ -417,28 +317,28 @@ __global__ void computeCovarianceMatrix(Point* points, Point* neighbors, float* 
 int main() {
 
         // Load the depth map image using OpenCV
-    cv::Mat depthMap = cv::imread("/home/riccardozappa/estimate-surface-normals-in-a-point-cloud/normalEstimation/depth_map_250k.png", cv::IMREAD_GRAYSCALE);
+    cv::Mat depthMap = cv::imread(imagePath, cv::IMREAD_GRAYSCALE);
 
     if (depthMap.empty()) {
         std::cerr << "Could not load depth map image." << std::endl;
         return -1;
     }
+    auto start = std::chrono::high_resolution_clock::now();
 
     // Convert the depth map to a point cloud using PCL
     pcl::PointCloud<pcl::PointXYZ>::Ptr pointCloud = depthMapToPointCloud(depthMap);
 
     int numPoints = pointCloud->size();
     std::cout << "the point cloud has " << numPoints << " Points" << std::endl;
-    auto start = std::chrono::high_resolution_clock::now();
 
     Point* h_points = (Point*)malloc(numPoints * sizeof(Point));
     Point* queries;
 
     eChk(cudaMallocManaged(&queries, numPoints * sizeof(Point)));
 
-    savePointCloudToStructCUDA(pointCloud, h_points);
-    savePointCloudToStructCUDA(pointCloud, queries);
-    
+    auto startPointCloud = std::chrono::high_resolution_clock::now();
+    savePointCloudToStructCUDA(pointCloud, h_points, queries);
+    auto endPointCloud = std::chrono::system_clock::now();
     // printPoints(h_points, numPoints);
 
     int TREE_SIZE = 1;
@@ -450,23 +350,25 @@ int main() {
     
     eChk(cudaMallocManaged(&tree, TREE_SIZE * sizeof(KDNode)));
 
+    auto startTree = std::chrono::high_resolution_clock::now();
     std::cout << "building KdTree"<< std::endl;
     buildKDTree(h_points, tree, numPoints, TREE_SIZE);
     int numBlocks = (numPoints + BLOCK_SIZE - 1) / BLOCK_SIZE;
-
+    auto endTree = std::chrono::system_clock::now();
     
     size_t newStackSize = 16 * 1024;  // 16 KB to start
     cudaDeviceSetLimit(cudaLimitStackSize, newStackSize);
 
     Point *results;
     eChk(cudaMallocManaged(&results, numPoints * K_NEIGHBORS * sizeof(Point)));
+    auto startNeighbour = std::chrono::high_resolution_clock::now();
     std::cout << "serarching for k nearest neighbours"<< std::endl;
     kNearestNeighborsGPU<<<numBlocks, BLOCK_SIZE>>>(tree, TREE_SIZE, queries, results, numPoints, K_NEIGHBORS);
     eChk(cudaDeviceSynchronize());
-    
+    auto endNeighbour = std::chrono::system_clock::now();
 
 
-    //printResults(queries, results, 0, numPoints);
+    printResults(queries, results, 0, 5);
     float* covarianceMatrices;
     Point* normals;
 
@@ -474,13 +376,15 @@ int main() {
     eChk(cudaMallocManaged(&covarianceMatrices, numPoints * MAX_DIM * MAX_DIM * sizeof(float)));
     eChk(cudaMallocManaged(&normals, numPoints * sizeof(Point)));
 
+    auto startCovariance = std::chrono::high_resolution_clock::now();
     // Step 1: Compute covariance matrices
     computeCovarianceMatrix<<<numPoints , 32>>>(queries, results, covarianceMatrices, numPoints, K_NEIGHBORS);
     eChk(cudaDeviceSynchronize());
-    
+    auto endCovariance = std::chrono::system_clock::now();
+
     // Debug: Print first covariance matrix
-    float debugMatrix[27];
-    cudaMemcpy(debugMatrix, covarianceMatrices, 27 * sizeof(float), cudaMemcpyDeviceToHost);
+    float debugMatrix[9];
+    cudaMemcpy(debugMatrix, covarianceMatrices, 9 * sizeof(float), cudaMemcpyDeviceToHost);
     std::cout << "First covariance matrix:" << std::endl;
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < 3; j++) {
@@ -488,27 +392,29 @@ int main() {
         }
         std::cout << std::endl;
     }
-    std::cout << "Second covariance matrix:" << std::endl;
-    for (int k = 3; k < 6; k++) {
-        for (int m = 0; m < 3; m++) {
-            std::cout << debugMatrix[k*3 + m] << " ";
-        }
-        std::cout << std::endl;
-    }
-        std::cout << "Third covariance matrix:" << std::endl;
-    for (int u = 3; u < 6; u++) {
-        for (int n = 0; n < 3; n++) {
-            std::cout << debugMatrix[u*3 + n] << " ";
-        }
-        std::cout << std::endl;
-    }
+    auto startNormals = std::chrono::high_resolution_clock::now();
     computeNormalsWithCuSolver(covarianceMatrices, normals, numPoints, MAX_DIM);
+    auto endNormals = std::chrono::system_clock::now();
 
     auto end = std::chrono::system_clock::now();
-    float duration = 1000.0 * std::chrono::duration<float>(end - start).count();
 
-    std::cout << "Elapsed time in milliseconds : " << duration << "ms\n\n";
-    printPoints(normals, 10);
+    float durationPointCloud = 1000.0 * std::chrono::duration<float>(endPointCloud - startPointCloud).count();
+    float durationTree = 1000.0 * std::chrono::duration<float>(endTree - startTree).count();
+    float durationNeighbour = 1000.0 * std::chrono::duration<float>(endNeighbour - startNeighbour).count();
+    float durationCovariance = 1000.0 * std::chrono::duration<float>(endCovariance - startCovariance).count();
+    float durationNormals = 1000.0 * std::chrono::duration<float>(endNormals - startNormals).count();
+
+    float duration = 1000.0 * std::chrono::duration<float>(end - start).count();
+    
+    std::cout << "Elapsed time in milliseconds PointCloud : " << durationPointCloud << "ms\n\n";
+    std::cout << "Elapsed time in milliseconds Tree : " << durationTree << "ms\n\n";
+    std::cout << "Elapsed time in milliseconds neighbours: " << durationNeighbour << "ms\n\n";
+    std::cout << "Elapsed time in milliseconds Covariance: " << durationCovariance << "ms\n\n";
+    std::cout << "Elapsed time in milliseconds Normals: " << durationNormals << "ms\n\n";
+
+    std::cout << "Elapsed time in milliseconds full: " << duration << "ms\n\n";
+
+    printPoints(normals, 1);
 
     eChk(cudaFree(results));
     eChk(cudaFree(tree));
@@ -561,29 +467,18 @@ __device__ float distance(const Point &p1, const Point &p2) {
     return sqrtf(dist);
 }
 
-// Device function to compare two points for K-nearest neighbor search
-struct KNNComparator {
-    __device__ bool operator()(const Point &p1, const Point &p2, const Point &query) {
-        return distance(p1, query) < distance(p2, query);
-    }
-};
-
 // Recursive device function for finding K nearest neighbors
  __device__ void findKNearestNeighbors(KDNode *tree, int treeSize, int treeNode, int depth, Point query, Point *neighbors, int k) {
     // Base case
     if (treeNode >= treeSize) return;
     KDNode node = tree[treeNode];
-    // printf("treeNode id: %d\n", treeNode);
-    // printf("%f, %f, %f\n", query.coords[0], query.coords[1], query.coords[2]);
-    // printf("%f, %f, %f\n", node.point.coords[0], node.point.coords[1], node.point.coords[2]);
-    // printf("node axis: %d\n", node.axis);
     if (node.axis == -1) return;
 
     bool near = false;
     int max = 0;
     float dist = 0;
     int index = 0;
-     // Push the current node point into neighbors array
+    // Push the current node point into neighbors array
     for (int i = 0; i < k; i++) {
         if ( distance(node.point, query) < distance(neighbors[i], query) ) {
             near = true;
@@ -603,8 +498,6 @@ struct KNNComparator {
         }
         neighbors[index] = node.point;
     }
-    // printf("query coord confronted: %f\n", query.coords[node.axis]);
-    // printf("node point coord confronted: %f\n", node.point.coords[node.axis]);
      // Find the next subtree to search
     int nextAxis = (depth + 1) % MAX_DIM;
     if (query.coords[node.axis] < node.point.coords[node.axis]) {

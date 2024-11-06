@@ -5,6 +5,8 @@
 #include <opencv2/opencv.hpp>
 #include <thread>
 
+const char* imagePath = "/home/riccardozappa/estimate-surface-normals-in-a-point-cloud/normalEstimation/images/depth_map_1m.png";
+
 // Camera intrinsics (you will need to fill these in based on your camera)
 const float fx = 500.0f;  // Focal length in x direction
 const float fy = 500.0f;  // Focal length in y direction
@@ -48,7 +50,7 @@ int main()
 {
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZ>);
         //read the depth map
-    cv::Mat depthMap = cv::imread("/home/riccardozappa/estimate-surface-normals-in-a-point-cloud/normalEstimation/depth_map_250k.png", cv::IMREAD_GRAYSCALE);
+    cv::Mat depthMap = cv::imread(imagePath, cv::IMREAD_GRAYSCALE);
 
     if (depthMap.empty()) {
         std::cerr << "Could not load depth map image." << std::endl;
@@ -75,7 +77,7 @@ int main()
     pcl::PointCloud<pcl::Normal>::Ptr cloud_normals (new pcl::PointCloud<pcl::Normal>);
 
     // Use all neighbors in a sphere of radius 3cm
-    ne.setRadiusSearch (7);
+    ne.setRadiusSearch (5);
     
     // Compute the features
     ne.compute (*cloud_normals);
@@ -85,27 +87,28 @@ int main()
     std::cout << "Elapsed time: " << duration << " milliseconds\n";
 
     std::cout << "the size of the normals cloud is: " << cloud_normals->size() << std::endl; //should have the same size as the input cloud->size ()*
-            // Find and display neighbor count for each of the first 10 points
-    for (size_t i = 0; i < std::min(cloud_normals->size(), static_cast<size_t>(10)); ++i) {
-        std::vector<int> neighbor_indices;
-        std::vector<float> neighbor_distances;
-        int neighbors_found = tree->radiusSearch(cloud->points[i], 7, neighbor_indices, neighbor_distances);
-
-        std::cout << "Normal " << i << ": [" 
-                  << cloud_normals->points[i].normal_x << ", "
-                  << cloud_normals->points[i].normal_y << ", "
-                  << cloud_normals->points[i].normal_z << "]"
-                  << " | Neighbors found: " << neighbors_found << std::endl;
-        // Print the neighbors' coordinates
-        std::cout << "Neighbors for point " << i << " " << cloud->points[i] << ":" << std::endl;
-        for (size_t j = 0; j < neighbor_indices.size(); ++j) {
-            const auto& neighbor_point = cloud->points[neighbor_indices[j]];
-            std::cout << "    Neighbor " << j << ": ["
-                  << neighbor_point.x << ", "
-                  << neighbor_point.y << ", "
-                  << neighbor_point.z << "] | Distance: " << neighbor_distances[j] << std::endl;
-        }
-    }
+    
+    // Find and display neighbor count for each of the first 10 points
+    //for (size_t i = 0; i < std::min(cloud_normals->size(), static_cast<size_t>(10)); ++i) {
+    //    std::vector<int> neighbor_indices;
+    //    std::vector<float> neighbor_distances;
+    //    int neighbors_found = tree->radiusSearch(cloud->points[i], 7, neighbor_indices, neighbor_distances);
+//
+    //    std::cout << "Normal " << i << ": [" 
+    //              << cloud_normals->points[i].normal_x << ", "
+    //              << cloud_normals->points[i].normal_y << ", "
+    //              << cloud_normals->points[i].normal_z << "]"
+    //              << " | Neighbors found: " << neighbors_found << std::endl;
+    //    // Print the neighbors' coordinates
+    //    std::cout << "Neighbors for point " << i << " " << cloud->points[i] << ":" << std::endl;
+    //    for (size_t j = 0; j < neighbor_indices.size(); ++j) {
+    //        const auto& neighbor_point = cloud->points[neighbor_indices[j]];
+    //        std::cout << "    Neighbor " << j << ": ["
+    //              << neighbor_point.x << ", "
+    //              << neighbor_point.y << ", "
+    //              << neighbor_point.z << "] | Distance: " << neighbor_distances[j] << std::endl;
+    //    }
+    //}
     std::cout << "First 10 normals:" << std::endl;
     for (size_t i = 0; i < std::min(cloud_normals->size(), static_cast<size_t>(10)); ++i) {
         std::cout << "Normal " << i << ": [" 

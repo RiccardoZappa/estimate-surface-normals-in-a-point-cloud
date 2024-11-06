@@ -22,6 +22,7 @@ set(CUDA_LIBRARIES ${CUDA_LIBRARIES} cusolver cublas)
 # Add executable target
 add_executable(normal_estimation_cuda cuda_normal_estimation.cu)
 add_executable(normal_estimation normalEstimation.cpp)
+add_executable(normal_estimation_raw normalComputation.cpp)
 
 # Set CUDA architectures (adjust based on your target GPUs)
 set_target_properties(normal_estimation_cuda PROPERTIES
@@ -31,10 +32,15 @@ set_target_properties(normal_estimation_cuda PROPERTIES
 target_include_directories(normal_estimation_cuda PRIVATE ${PCL_INCLUDE_DIRS} ${CUDA_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS})
 
 target_include_directories(normal_estimation PRIVATE  ${PCL_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS})
+
+target_include_directories(normal_estimation_raw PRIVATE  ${PCL_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS})
+
 # Link against CUDA libraries
 target_link_libraries(normal_estimation_cuda PRIVATE ${CUDA_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBS})
 
 target_link_libraries(normal_estimation PRIVATE ${PCL_LIBRARIES} ${OpenCV_LIBS})
+
+target_link_libraries(normal_estimation_raw PRIVATE ${PCL_LIBRARIES} ${OpenCV_LIBS})
 
 # Check for C and C++ compilers
 enable_language(C CXX)
