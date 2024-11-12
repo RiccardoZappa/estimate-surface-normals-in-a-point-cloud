@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <queue>
 #include <cmath>
+#include <thrust/device_ptr.h>
+#include <thrust/sort.h>
 #include <cuda_runtime.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -308,9 +310,13 @@ int main() {
     
     KDNode *tree;
     
+    Point* d_points;
     eChk(cudaMallocManaged(&tree, TREE_SIZE * sizeof(KDNode)));
+    
+    cudaMalloc(&d_points, numPoints * sizeof(Point));
+    cudaMemcpy(d_points, h_points, numPoints * sizeof(Point), cudaMemcpyHostToDevice);
 
-    buildKDTree(h_points, tree, numPoints, TREE_SIZE);
+    buildKDTree(d_points, tree, numPoints, TREE_SIZE);
     int numBlocks = (numPoints + BLOCK_SIZE - 1) / BLOCK_SIZE;
     
     size_t newStackSize = 16 * 1024;  // 16 KB to start
@@ -357,8 +363,10 @@ int main() {
 // Comparator for sorting points based on the current axis
 struct PointComparator {
     int axis;
+    __host__ __device__
     PointComparator(int ax) : axis(ax) {}
 
+    __host__ __device__
     bool operator()(const Point &p1, const Point &p2) {
         return p1.coords[axis] < p2.coords[axis];
     }
@@ -369,7 +377,14 @@ __host__ void buildSubTree(Point *points, KDNode *tree, int start, int end, int 
     if (start >= end) return;
 
     int axis = depth % MAX_DIM;
-    std::sort(points + start, points + end, PointComparator(axis));
+    //std::sort(points + start, points + end, PointComparator(axis));
+
+    // Create a Thrust device pointer from the raw Point* array
+    thrust::device_ptr<Point> d_points_start = thrust::device_pointer_cast(points + start);
+    thrust::device_ptr<Point> d_points_end = thrust::device_pointer_cast(points + end);
+
+    // Use Thrust to sort the points based on the current axis
+    thrust::sort(d_points_start, d_points_end, PointComparator(axis));
 
     int split = (start + end - 1) / 2;
     tree[node].point = points[split];
